@@ -133,3 +133,39 @@ print(e.go_home())
 ```
 
 即：**杀掉游戏 → 重启 → 锁横屏 → 回机库**。
+
+
+---
+
+## I. adb 完全不可用
+
+| 现象 | 根因 | 处理 |
+|---|---|---|
+| `adb devices` 报 `could not read ok from ADB Server` | adb 守护进程起不来 | 见下 |
+| 日志有 `cannot open ...\Temp\adb.log: Permission denied` | Temp 下 adb.log 权限异常 | 见下 |
+| 所有截图/点击都失败 | 同上 | 同上 |
+
+**修复步骤**：
+
+```powershell
+Get-Process adb -ErrorAction SilentlyContinue | Stop-Process -Force
+Remove-Item "$env:TEMP\adb.log" -Force -ErrorAction SilentlyContinue
+$adb kill-server; $adb start-server; $adb devices
+```
+
+**根治**：`device.py` 的 `_adb_env()` 已把 `TMP/TEMP` 指到项目内 `.tmp/`，
+**改了 device.py 后必须重启 Python 进程**（webui / engine）才生效。
+
+## J. 点了按钮没反应，但页面/日志说"未触发广告"
+
+先别改逻辑，先看 Activity：
+
+```powershell
+& $py -c "import sys;sys.path.insert(0,r'.');import device as d;print(d.top_activity())"
+```
+
+- 若显示 `...openadsdk...` → 是穿山甲广告，需要点右上灰色圆形 X（`(2309,113)`）
+- 若显示 `...gms.ads...` → AdMob，用 BACK
+- 若显示 `...applovin...` → AppLovin，点角部 Next/X
+
+已有三个 SDK 的判定，但**以后可能加新 SDK**，看到陌生 Activity 名先搜关键字。

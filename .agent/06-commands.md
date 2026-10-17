@@ -79,3 +79,24 @@ wr.bat all --replenish 2      # 完整日常（领奖+广告+抽奖+战斗补充
 | 一次抽奖（含广告） | 40~60 秒 |
 | 抽满 3 次（含 2 次冷却） | 约 11~12 分钟 |
 | `loop --cycles 6` | 约 15 分钟 |
+
+
+---
+
+## 升级加速（新增）
+
+```powershell
+wr.bat upgrade              # 反复看广告减少升级时间，每次 -4 小时
+wr.bat upgrade --max-ads 5  # 限制最多看 5 次
+wr.bat all                  # 完整日常里会自动包含升级加速
+wr.bat ads --upgrade        # 广告流程里带上升级加速
+```
+
+## 同步到 Git 仓库
+
+```powershell
+sync_to_git.bat                          # 同步并提交（默认信息）
+sync_to_git.bat "feat: 做了什么改动"      # 同步并提交（自定义信息）
+```
+
+仓库位置：`D:\git\warrobots-auto`

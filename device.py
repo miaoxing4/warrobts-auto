@@ -26,10 +26,32 @@ def ensure_dirs():
     os.makedirs(LOG_DIR, exist_ok=True)
 
 
+def _adb_env():
+    """
+    给 adb 子进程准备环境变量。
+
+    踩坑记录：Windows 下 adb 守护进程会尝试写 %TEMP%\\adb.log，
+    若该文件/目录权限异常，会报
+        "cannot open ...\\adb.log: Permission denied"
+        "could not read ok from ADB Server" → 整个 adb 不可用。
+    因此强制把 TMP/TEMP 指到项目内可写目录。
+    """
+    env = os.environ.copy()
+    tmpdir = os.path.join(PROJ_DIR, ".tmp")
+    try:
+        os.makedirs(tmpdir, exist_ok=True)
+        env["TMP"] = tmpdir
+        env["TEMP"] = tmpdir
+    except Exception:
+        pass
+    return env
+
+
 def adb(*args, timeout=60, binary=False):
     cmd = [ADB] + list(args)
     try:
-        p = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        p = subprocess.run(cmd, capture_output=True, timeout=timeout,
+                           env=_adb_env())
         if binary:
             return p.returncode, p.stdout
         return p.returncode, p.stdout.decode("utf-8", errors="replace") + \

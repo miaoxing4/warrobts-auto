@@ -234,3 +234,59 @@
 **纪律**：
 - `captures/` 里有一批文件是**回归基准样本**，删之前对照 `test_state_offline.py` 的用例表。
 - 要清理只删带时间戳的临时截图（`wad_*`、`claim_*`、`nav_*` 等）。
+
+---
+
+## 坑 16：还有第三种广告 SDK —— ByteDance 穿山甲
+
+**现象**：点机库顶部「-4时 钟减少」后，脚本报"未触发广告"，
+但其实广告已经弹出来了；随后界面被误判成 `battle_prep`。
+
+**根因**：第三个广告 SDK 我最初没识别：
+`com.bytedance.sdk.openadsdk.activity.TTFullWebActivity`
+（穿山甲 / Pangle）。
+
+**修复**：
+- `ad_handler.is_ad_activity()` 与 `ui_state` 都加上
+  `openadsdk` / `bytedance` / `pangle` 判定
+- 关闭方式：**右上角灰色圆形 X**（实测中心 `(2309,113)`，bbox x[2268,2351] y[72,155]）
+  - `BACK` 对它**无效**
+  - 动态检测 + 固定位置 `BD_CLOSE_FALLBACK=(2309,113)` 兜底
+
+**教训**：广告 SDK 不止 AppLovin/AdMob。新广告来源可能用新 SDK，
+日志里看到 `未触发广告` 但画面明显是广告时，先 `dumpsys` 看 Activity 名。
+
+---
+
+## 坑 17：adb 因 %TEMP%\adb.log 权限问题整个不可用
+
+**现象**：所有 adb 命令失败，`adb devices` 输出
+`could not read ok from ADB Server` / `failed to start daemon`，
+logcat 里 `cannot open C:\Users\...\Temp\adb.log: Permission denied`。
+
+**根因**：adb 守护进程启动时要写 `%TEMP%\adb.log`，
+该文件/目录权限异常（被其它进程创建且 ACL 不对）→ daemon 起不来。
+
+**修复**（已写进 `device.py`）：给所有 adb 子进程强制指定工作区内临时目录：
+
+```python
+def _adb_env():
+    env = os.environ.copy()
+    tmpdir = os.path.join(PROJ_DIR, ".tmp")
+    os.makedirs(tmpdir, exist_ok=True)
+    env["TMP"] = tmpdir
+    env["TEMP"] = tmpdir
+    return env
+
+subprocess.run(cmd, capture_output=True, timeout=timeout, env=_adb_env())
+```
+
+**救急命令**：
+
+```powershell
+Get-Process adb | Stop-Process -Force
+Remove-Item "$env:TEMP\adb.log" -Force
+# 然后让 device.py 的 _adb_env 生效（重启进程）
+```
+
+**教训**：adb 失败先看它自己的错误输出，不要先怀疑设备/线缆。

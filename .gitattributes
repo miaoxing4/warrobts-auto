@@ -9,3 +9,4 @@
 *.png binary
 *.npy binary
 *.exe binary
+*.dll binary
