@@ -178,3 +178,33 @@ menu_other×2、leave_warning。
 **加新状态时务必同时加一个真实截图样本**，否则下次改判据会悄悄回归。
 
 采集样本：`python collect_refs.py`（游戏空闲时跑，别在对局中跑）。
+
+---
+
+## 修订记录：`battle_prep` 判据（重要）
+
+**旧（有 bug）**：
+```python
+if card_cyan > 0.15 and warm > 0.12 and not greens:
+```
+在暗色雨雾地图上 `warm=0.113`，差 0.007 不满足 → 部署界面被漏判成 `menu_other`，
+导致循环对局一直不部署机甲。
+
+**新（现行）**：
+```python
+# 3D 场景 + 半透明机甲卡片 → card_cyan 中等(0.15~0.72)
+# 纯 UI 页面 card_cyan >= 0.71（活动/每日/通行证/抽奖/奖励弹窗）
+# greens 非空 → 机库/商店/任务页（有大片绿色按钮）
+# orange_tr >= 0.45 → 机库
+if 0.15 < card_cyan < 0.72 and not greens and orange_tr < 0.45:
+    battle_prep
+```
+
+**不要再用 `warm` 判断战斗/部署界面** —— 它随地图天气剧烈变化。
+
+## 关于 `bright` 字段
+
+`info["bright"] = (gray > 18).mean()` 是**非黑像素占比**，
+几乎所有界面都 ≈ 0.97~0.99，**没有区分度**。
+不要用它判断"画面很亮"，也不要据此识别启动画面（实测启动画面平均亮度 91.5，
+机库 87.0，无法区分）。

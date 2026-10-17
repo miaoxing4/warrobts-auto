@@ -184,8 +184,16 @@ def dismiss_overlay():
     return False
 
 
-def go_home(max_rounds=6):
-    """尽力回到机库"""
+def go_home(max_rounds=6, restart_on_stuck=True):
+    """
+    尽力回到机库。
+
+    额外兜底：若连续多次「返回」都毫无进展（界面状态一直不变），
+    说明卡在了无法用返回键脱离的界面（实测例子：游戏重启后停在
+    WAR ROBOTS 启动画面，返回键完全无效，会一直空转）。
+    此时直接重启游戏，比无限重试可靠。
+    """
+    seen = []
     for i in range(max_rounds):
         info = u.detect(keep=False)
         st = info["state"]
@@ -220,6 +228,24 @@ def go_home(max_rounds=6):
         else:
             d.back()
             time.sleep(1.8)
+
+        # 无进展检测：连续 3 次状态完全相同 → 卡死，重启游戏
+        seen.append(st)
+        if restart_on_stuck and len(seen) >= 3 and len(set(seen[-3:])) == 1:
+            d.log("go_home: 连续 3 次停留在 [%s]，返回键无效 → 重启游戏" % st)
+            try:
+                d.stop()
+                time.sleep(2.0)
+                d.launch(wait=25)
+                d.lock_landscape()
+                time.sleep(3.0)
+            except Exception as ex:
+                d.log("go_home: 重启游戏失败 %s" % ex)
+            i2 = u.detect(keep=False)
+            d.log("go_home: 重启后界面 %s" % i2["state"])
+            if i2["state"] == "hangar":
+                return True
+            seen.clear()
     return u.detect(keep=False)["state"] == "hangar"
 
 
@@ -1048,6 +1074,29 @@ def enter_battle(timeout=150):
                 d.log("enter_battle: 仍在战斗中")
             return True, prep_at
 
+        # ---- 盲部署兜底 ----
+        # 若停在未知界面（menu_other）但特征像对局（3D 场景 + 半透明卡片），
+        # 说明状态识别可能又漏判了。此时不能一直干等，直接尝试点机甲卡片。
+        # 判据：无大片绿色按钮（排除商店/任务页）+ card_cyan>0.10 + 非机库
+        if (st in ("menu_other", "unknown") and elapsed > 12
+                and not info.get("greens")
+                and info.get("card_cyan", 0) > 0.10
+                and info.get("orange_tr", 1) < 0.45):
+            if prep_at is None:
+                prep_at = time.time()
+                d.log("enter_battle: 疑似对局界面被漏判（card_cyan=%.2f），"
+                      "按部署界面处理并开始安全计时"
+                      % info.get("card_cyan", 0))
+            if deploy_tries < 6:
+                deploy_tries += 1
+                spots = [POS["deploy_robot"], (900, 700), (1600, 700),
+                         (1700, 700), (520, 700), (1310, 600)]
+                spot = spots[min(deploy_tries - 1, len(spots) - 1)]
+                d.log("enter_battle: 盲部署机甲 → %s（第 %d 次）" % (spot, deploy_tries))
+                click(spot[0], spot[1], wait=3.0)
+                time.sleep(1.5)
+            continue
+
         if elapsed > 25 and st == "hangar":
             d.log("enter_battle: 仍在机库，重试")
             click(*POS["battle_btn"], wait=3.5)
@@ -1056,6 +1105,17 @@ def enter_battle(timeout=150):
                 click(*POS["mode_battle_btn"], wait=4.0)
         time.sleep(3.0)
 
+    # 超时：保存现场截图，便于事后定位是哪个界面卡住
+    try:
+        img, path = d.screenshot("enter_timeout_%s.png"
+                                 % time.strftime("%H%M%S"))
+        if img is not None:
+            info2 = u.detect(img=img)
+            d.log("enter_battle: 超时现场已保存 %s" % path)
+            d.log("enter_battle: 现场判定=%s reasons=%s"
+                  % (info2["state"], info2.get("reasons")))
+    except Exception:
+        pass
     d.log("enter_battle: 超时未进入战斗")
     return False, prep_at
 

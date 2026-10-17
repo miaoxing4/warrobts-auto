@@ -293,9 +293,15 @@ def detect(img=None, save_name=None, keep=True):
         return info
 
     # 部署/复活界面（机器人卡片）
-    if card_cyan > 0.15 and warm > 0.12 and not greens:
+    # 实测修正：3D 场景上覆盖半透明机甲卡片 → card_cyan 中等（0.2~0.7）
+    #   纯 UI 页面 card_cyan >= 0.71（活动0.99 / 每日0.89 / 通行证0.84 / 抽奖0.81 / 奖励弹窗0.96）
+    #   机库 card_cyan 0.52~0.59 但有大片绿色按钮（greens 非空）
+    #   旧判据要求 warm>0.12，在暗色雨雾地图上 warm=0.113 刚好不满足 → 部署界面被漏判，
+    #   导致 enter_battle 一直停在该界面空转。故改为"card_cyan 区间 + 无绿色大按钮"。
+    if 0.15 < card_cyan < 0.72 and not greens and orange_tr < 0.45:
         info["state"] = "battle_prep"
-        reasons.append("card_cyan=%.2f warm=%.2f" % (card_cyan, warm))
+        reasons.append("card_cyan=%.2f (mid-band) warm=%.2f orange_tr=%.2f"
+                       % (card_cyan, warm, orange_tr))
         return info
 
     # 黑市（Black Market）：**整屏深紫背景**（实测暗紫占比 0.66，其它界面 < 0.01）

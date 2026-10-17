@@ -49,6 +49,9 @@ CASES = [
     ("scan_left_mission.png", "event_pass"),
     ("N1_check.png",          "menu_other"),
     ("LEAVE_WARNING.png",     "leave_warning"),
+    # 暗色雨雾地图的部署界面：旧判据 warm>0.12 会漏判成 menu_other，
+    # 导致 enter_battle 停在部署界面空转（用户实测反馈）
+    ("prep_dark_map.jpg",     "battle_prep"),
 ]
 
 # 可选扩展样本（存在则一起测）
