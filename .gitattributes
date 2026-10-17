@@ -1,0 +1,11 @@
+﻿# 自动换行符归一
+* text=auto eol=lf
+
+# Windows 批处理保持 CRLF
+*.bat text eol=crlf
+
+# 二进制
+*.jpg binary
+*.png binary
+*.npy binary
+*.exe binary

@@ -1,0 +1,22 @@
+# ---- 依赖与二进制（可重新下载，不入库）----
+tools/
+*.exe
+*.dll
+*.zip
+
+# ---- Python ----
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# ---- 运行时产物 ----
+logs/
+# 运行截图体积大；回归用的样本已压缩为 JPEG 放在 tests/fixtures/
+captures/
+
+# ---- 本地临时 ----
+_sync_tmp/
+~$*
+Thumbs.db
+.desktop.ini
