@@ -16,9 +16,11 @@ logs/
 captures/
 
 # ---- 本地临时 ----
+.device_serial
 .tmp/
 _sync_tmp/
 ~$*
 Thumbs.db
 .desktop.ini
+
 

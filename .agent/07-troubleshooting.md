@@ -169,3 +169,16 @@ $adb kill-server; $adb start-server; $adb devices
 - 若显示 `...applovin...` → AppLovin，点角部 Next/X
 
 已有三个 SDK 的判定，但**以后可能加新 SDK**，看到陌生 Activity 名先搜关键字。
+
+---
+
+## K. 无线 ADB 连不上
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| `adb mdns services` 空 | 手机没开无线调试 / 不在同网段 | 打开无线调试；确认同 Wi-Fi |
+| `connection refused` | 端口变了（重启/重开调试） | 重跑 `wireless.bat` |
+| `failed to authenticate` | 未配对 | `wireless.bat pair <IP:端口> <6位码>` |
+| 连上了但 `no devices` | 串号写错 | `wireless.bat forget` 后重连 |
+| 操作很慢 | 无线传输慢 | 属正常（detect 约 2s）；战斗建议用 USB |
+| USB 和无线同时连 | adb 报 `more than one device` | 已由 `resolve_serial()` 自动处理，或 `wireless.bat forget` |

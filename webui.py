@@ -305,27 +305,66 @@ def dispatch(action, params):
 _shot_cache = {"ts": 0.0, "png": None}
 _shot_lock = threading.Lock()
 
+# 无线 ADB 下每次 screencap 约 2 秒，而浏览器在持续轮询；
+# 必须缓存 + 串行化，否则请求排队会把响应拖到几十秒。
+SHOT_TTL = 3.0          # 截图缓存秒数（页面每 4 秒刷新一次）
+STATE_TTL = 2.5         # 界面识别缓存秒数（status 每 2.5 秒轮询）
+_state_cache = {"ts": 0.0, "v": None}
+DEV_LOCK = threading.Lock()
 
-def get_screenshot(max_age=2.5):
-    """返回 PNG bytes（带短缓存，减少对设备的压力）"""
+
+def _ttl(base):
+    """任务运行中时把缓存时间放大，避免控制台轮询和任务抢设备（无线下尤其要紧）"""
+    return base * 3.0 if RUNNER.is_running() else base
+
+
+def get_ui_state(max_age=None):
+    """
+    带缓存的界面识别。
+    注意：webui 里用的是**未被取消包装**的 _orig_detect，
+    避免把控制台自己的轮询也算进任务取消判定。
+    """
+    if max_age is None:
+        max_age = _ttl(STATE_TTL)
+    now = time.time()
+    if _state_cache["v"] and (now - _state_cache["ts"]) < max_age:
+        return _state_cache["v"]
+    if RUNNER.is_running() and _state_cache["v"]:
+        # 任务在跑就别抢设备了，直接用上次的值
+        return _state_cache["v"]
+    with DEV_LOCK:
+        try:
+            st = _orig_detect(keep=False)["state"]
+        except Exception:
+            st = _state_cache["v"]
+    _state_cache["v"] = st
+    _state_cache["ts"] = time.time()
+    return st
+
+
+def get_screenshot(max_age=None):
+    """返回 JPEG bytes（带缓存 + 串行锁，减少无线下的排队）"""
+    if max_age is None:
+        max_age = _ttl(SHOT_TTL)
     with _shot_lock:
         now = time.time()
         if _shot_cache["png"] and (now - _shot_cache["ts"]) < max_age:
             return _shot_cache["png"]
-        try:
-            from PIL import Image
-            arr, _ = d.screenshot(None, save=False)
-            if arr is None:
-                return _shot_cache["png"]
-            im = Image.fromarray(arr)
-            buf = io.BytesIO()
-            im.save(buf, format="JPEG", quality=70)
-            png = buf.getvalue()
-            _shot_cache["png"] = png
-            _shot_cache["ts"] = now
-            return png
-        except Exception:
-            return _shot_cache["png"]
+        with DEV_LOCK:
+            try:
+                from PIL import Image
+                arr, _ = d.screenshot(None, save=False)
+                if arr is None:
+                    return _shot_cache["png"]
+                im = Image.fromarray(arr)
+                buf = io.BytesIO()
+                im.save(buf, format="JPEG", quality=70)
+                png = buf.getvalue()
+                _shot_cache["png"] = png
+                _shot_cache["ts"] = time.time()
+            except Exception:
+                pass
+        return _shot_cache["png"]
 
 
 # ============================================================ 页面
@@ -465,7 +504,7 @@ HTML = r"""<!DOCTYPE html>
       <h2>手机画面 <span id="shotTs" style="color:var(--dim);font-weight:400;text-transform:none"></span></h2>
       <img id="shot" alt="手机截图">
       <div class="row">
-        <label class="opt"><input type="checkbox" id="autoShot" checked> 自动刷新（3 秒）</label>
+        <label class="opt"><input type="checkbox" id="autoShot" checked> 自动刷新（4 秒）</label>
         <button id="btnShot" style="padding:6px 12px;font-size:12px">立即刷新</button>
       </div>
     </div>
@@ -623,8 +662,8 @@ async function refresh(){
   }catch(e){ /* 网络抖动忽略 */ }
 }
 
-setInterval(refresh, 1500);
-setInterval(()=>{ if(!$('#autoShot').checked) return; refreshShot(false); }, 3000);
+setInterval(refresh, 2500);
+setInterval(()=>{ if(!$('#autoShot').checked) return; refreshShot(false); }, 4000);
 refresh(); refreshShot(true);
 </script>
 </body>
@@ -669,10 +708,7 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     since = 0
             st = RUNNER.status()
-            try:
-                ui_state = _orig_detect(keep=False)["state"]
-            except Exception:
-                ui_state = None
+            ui_state = get_ui_state()
             hist = rr.load_history()[-30:]
             self._json({
                 "task": st,

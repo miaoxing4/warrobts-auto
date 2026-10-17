@@ -115,3 +115,15 @@ wr.bat all                   # 完整日常已包含特惠礼包
 
 > ⚠️ 特惠页有一个分栏是**真实货币折扣页**，脚本会自动识别并跳过，
 > 绝不会点击付费按钮（已加回归测试保护）。
+
+---
+
+## 无线 ADB
+
+```powershell
+wireless.bat                 # 自动发现并连接（手机需开无线调试）
+wireless.bat status          # 查看当前串号与设备
+wireless.bat tcpip           # 需插 USB 一次，之后可用 IP:5555
+wireless.bat pair <地址> <码> # 首次配对
+wireless.bat forget          # 清除串号，回到自动选择
+```

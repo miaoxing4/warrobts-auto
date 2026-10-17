@@ -59,7 +59,44 @@
 
 ---
 
-## 3. 关键技术说明
+## 3. 无线 ADB（可选）
+
+默认走 USB。想拔掉数据线也能用，支持**无线调试**：
+
+```powershell
+wireless.bat            # 自动发现并连接（手机需先打开「无线调试」）
+wireless.bat status     # 查看当前连接
+wireless.bat forget     # 忘记当前串号，回到自动选择
+```
+
+首次连接需要配对（手机「无线调试 → 使用配对码配对设备」会给出地址和 6 位码）：
+
+```powershell
+wireless.bat pair 192.168.1.9:41234 123456
+```
+
+也可以插一次 USB 开启固定端口，之后拔线：
+
+```powershell
+wireless.bat tcpip      # 之后串号为 IP:5555
+```
+
+### 速度对比（实测）
+
+| 指标 | USB | 无线 |
+|---|---|---|
+| 一次界面识别 | ~0.8s | **~2.0s** |
+| 一局战斗完整流程 | ~150s | ~146s（几乎无差别） |
+
+> 战斗的「停留 70 秒」是墙钟计时，不受截图速度影响，所以**无线下同样安全**。
+> 截图已改为 **RAW 方式**（比 PNG 快 27%，因为绕开了手机端慢速 PNG 编码）。
+
+**建议**：战斗循环用 USB 更稳；广告/礼包/抽奖这类等待多的流程，无线完全够用。
+详见 `.agent/11-wireless.md`。
+
+---
+
+## 4. 关键技术说明
 
 War Robots 是 Unity 游戏，**不暴露 Android 无障碍树**（`uiautomator dump` 只能拿到空 FrameLayout），
 因此本项目全部采用 **截图 + 视觉识别 + 坐标点击** 的自动化方式。
@@ -109,7 +146,7 @@ python collect_refs.py             # 游戏空闲时采集更多界面样本
 
 ---
 
-## 4. 目标一：广告浏览 + 礼包领取
+## 5. 目标一：广告浏览 + 礼包领取
 
 ```powershell
 python engine.py ads --rounds 6 --minutes 15
@@ -223,7 +260,7 @@ wr.bat ads --lottery        # 在广告流程里顺带抽奖
 
 ---
 
-## 5. 目标二：参与游戏并停留 ≥ 70 秒
+## 6. 目标二：参与游戏并停留 ≥ 70 秒
 
 ```powershell
 python engine.py battle           # 单次
@@ -287,7 +324,7 @@ python engine.py loop --cycles 5  # 多轮（并自动记录荣誉积分变化�
 
 ---
 
-## 6. 难度分值（荣誉积分）读取与验证
+## 7. 难度分值（荣誉积分）读取与验证
 
 ### 5.1 路径
 
@@ -343,7 +380,7 @@ python rating_report.py        # 生成带趋势图的报告 + logs/rating_repor
 
 ---
 
-## 7. 文件结构
+## 8. 文件结构
 
 ```
 warrobots-auto/
@@ -380,7 +417,7 @@ warrobots-auto/
 
 ---
 
-## 8. 常用命令速查
+## 9. 常用命令速查
 
 ```powershell
 $py = "C:\Users\admin\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\python.exe"
@@ -435,7 +472,7 @@ $py = "C:\Users\admin\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\
 
 ---
 
-## 9. 已知限制与注意事项
+## 10. 已知限制与注意事项
 
 1. **挑战弹窗**：游戏中「你收到了挑战」对话框对注入点击不响应（实测所有坐标映射均无效，
    仅返回键可关闭），脚本会等待其自动超时后继续，不会卡死。
