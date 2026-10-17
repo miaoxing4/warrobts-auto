@@ -57,6 +57,12 @@ POS = {
     "modal_confirm":    (1512, 704),
     "modal_cancel":     (886, 704),
     "modal_x":          (2237, 365),
+    'back':             (155, 1000),   # 二级页左下「返回」/「前往机库」
+    # --- 特惠页（机库左侧最下方购物车进入，左侧 1/2/3 分栏）---
+    "deals_cart":       (157, 700),    # 左侧竖列第 4 个：购物车（带 22时x分 倒计时）
+    "deals_tab1":       (200, 286),    # 左侧「1」分栏
+    "deals_tab2":       (200, 390),    # 左侧「2」分栏
+    "deals_tab3":       (200, 477),    # 左侧「3」分栏
 }
 
 # 战斗操作区（逻辑坐标）
@@ -774,6 +780,195 @@ def run_lottery(max_draws=3, wait_cooldown=True, cooldown_wait=420,
     return drawn
 
 
+def open_deals(max_wait=14):
+    """
+    回机库 → 点最左下角购物车 → 进入「特惠」页。
+    购物车实测中心 (157, 700)（左侧竖列第 4 个，带 22时x分 倒计时）。
+    注意：不强制选哪个分栏 —— 三个分栏内容会变，由调用方逐个扫描。
+    """
+    if not go_home():
+        d.log("open_deals: 无法回到机库")
+        return False
+    click(*POS["deals_cart"], wait=3.5)
+    t0 = time.time()
+    while time.time() - t0 < max_wait:
+        st = u.detect(keep=False)["state"]
+        if st == "deals":
+            d.log("open_deals: 已进入特惠页")
+            return True
+        if st == "dialog":
+            dismiss_dialog()
+        elif st == "reward_popup":
+            dismiss_reward_popup()
+        elif st in ("play_store", "foreign_app", "launcher"):
+            import ad_handler
+            ad_handler.back_to_game("open_deals")
+        time.sleep(1.0)
+    d.log("open_deals: 未能进入特惠页（当前 %s）" % u.detect(keep=False)["state"])
+    return False
+
+
+DEAL_TABS = ((1, "deals_tab1"), (2, "deals_tab2"), (3, "deals_tab3"))
+
+
+def watch_deals_ads(cards=3, max_rounds=40, max_minutes=25, replenish=0):
+    """
+    特惠页：对**前 N 张**礼包卡循环「看广告 → 领取」。
+
+    实测规则（2400x1080）：
+      * 从机库左侧最下方**购物车**进入；左侧有 1/2/3 三个分栏
+      * **三个分栏内容会变**：可能是「广告礼包」（紫色观看 / 绿色获取），
+        也可能是「限时折扣」（橙色 % 背景、JP¥80 等真实货币价格）。
+        广告礼包不一定在第 1 栏（实测某次跑到了第 2 栏），所以逐个扫描。
+      * 5 张礼包卡横排，卡中心 x = 493/940/1386/1832/2278，按钮中心 y = 815
+      * 按钮三态：紫色「观看」/ 绿色「获取」/ 深色「已结束」或🔒
+      * **顺序解锁**：卡1 完成后卡2 才可观看
+      * 领取后弹「购买成功」→ 点绿色「确定」
+
+    ⚠️ 安全护栏：付费折扣页上的按钮是**真实货币购买**，
+    点了会拉起 Google Play 支付。`task_ui.deal_page_is_paid()` 为真时**绝对不点**。
+
+    参数：
+      cards   只处理前几张（用户要求只做前 3 张，微芯片/纪念币跳过）
+    返回 (广告次数, 领取次数)
+    """
+    import ad_handler
+    import task_ui
+
+    d.log("#" * 56)
+    d.log("# 特惠页：看广告领礼包（只做前 %d 张，跳过付费页）" % cards)
+    d.log("#" * 56)
+
+    ads = 0
+    claims = 0
+    if not open_deals():
+        return 0, 0
+
+    start = time.time()
+    empty = 0
+    for rnd in range(max_rounds):
+        if (time.time() - start) / 60.0 > max_minutes:
+            d.log("watch_deals: 超过总时长上限，结束")
+            break
+        if stop_requested():
+            d.log("watch_deals: 收到停止请求")
+            break
+
+        st = u.detect(keep=False)["state"]
+
+        if st == "ad":
+            ok, secs, _ = ad_handler.handle_ad(max_seconds=180)
+            d.log("watch_deals: 广告处理 ok=%s 用时=%.0fs" % (ok, secs))
+            time.sleep(2.0)
+            continue
+        if st == "reward_popup":
+            d.log("watch_deals: 领取成功（购买成功窗口），点确定")
+            dismiss_reward_popup()
+            claims += 1
+            empty = 0
+            time.sleep(1.5)
+            continue
+        if st == "dialog":
+            dismiss_dialog()
+            continue
+        if st == "event_reward_track":
+            dismiss_overlay()
+            continue
+        if st in ("play_store", "foreign_app", "launcher"):
+            ad_handler.back_to_game("watch_deals")
+            continue
+
+        if st != "deals":
+            d.log("watch_deals: 当前不在特惠页（%s），重新进入" % st)
+            if not open_deals():
+                break
+            continue
+
+        # ---- 扫描三个分栏，找可操作的广告礼包 ----
+        acted = False
+        saw_unavailable = False
+        for tab_no, tab_key in DEAL_TABS:
+            click(*POS[tab_key], wait=2.0)
+            img, _ = d.screenshot(save=False)
+            if img is None:
+                continue
+
+            if task_ui.deal_page_is_paid(img):
+                d.log("watch_deals: 分栏 %d 是付费折扣页（真实货币）→ 跳过，不点任何按钮"
+                      % tab_no)
+                continue
+
+            btns = task_ui.classify_deal_buttons(img, cards)
+            summary = " ".join("卡%d:%s" % (b["index"], b["kind"]) for b in btns)
+            d.log("watch_deals: 第 %d 轮 分栏%d  %s" % (rnd + 1, tab_no, summary))
+            if any(b["kind"] == "unavailable" for b in btns):
+                saw_unavailable = True
+
+            claim = [b for b in btns if b["kind"] == "claim"]
+            if claim:
+                b = claim[0]
+                d.log("watch_deals: 分栏%d 点击卡%d「获取」@(%d,%d)"
+                      % (tab_no, b["index"], b["x"], b["y"]))
+                click(b["x"], b["y"], wait=3.0)
+                time.sleep(1.5)
+                empty = 0
+                acted = True
+                break
+
+            watch = [b for b in btns if b["kind"] == "watch"]
+            if watch:
+                b = watch[0]
+                d.log("watch_deals: 分栏%d 点击卡%d「观看」@(%d,%d)"
+                      % (tab_no, b["index"], b["x"], b["y"]))
+                click(b["x"], b["y"], wait=3.5)
+                got = False
+                for _ in range(12):
+                    pkg, act2 = d.top_activity()
+                    if ad_handler.is_ad_activity(pkg, act2) or pkg != d.PKG:
+                        got = True
+                        break
+                    time.sleep(1.0)
+                if got:
+                    ok, secs, _ = ad_handler.handle_ad(max_seconds=180)
+                    ads += 1
+                    d.log("watch_deals: 卡%d 累计第 %d 次广告完成（ok=%s %.0fs）"
+                          % (b["index"], ads, ok, secs))
+                    time.sleep(2.0)
+                else:
+                    d.log("watch_deals: 卡%d 点击后未触发广告" % b["index"])
+                    empty += 1
+                acted = True
+                break
+
+        if not acted:
+            # 有「不可用」说明广告暂时耗尽 —— 可用进战斗补充
+            if saw_unavailable and replenish > 0:
+                replenish -= 1
+                d.log("=" * 56)
+                d.log("watch_deals: 广告暂不可用 → 进战斗补充（剩余 %d 场）" % replenish)
+                d.log("=" * 56)
+                if goal_battle():
+                    d.log("watch_deals: 补充战斗完成，重试特惠页")
+                    if not open_deals():
+                        break
+                    empty = 0
+                    continue
+                d.log("watch_deals: 补充战斗未成功，停止补充")
+            empty += 1
+            d.log("watch_deals: 三个分栏均无可操作广告礼包（%d/2）%s"
+                  % (empty, "（含不可用）" if saw_unavailable else ""))
+            if empty >= 2:
+                d.log("watch_deals: 判定广告礼包已全部处理完（或今日用尽）")
+                break
+            time.sleep(3.0)
+
+    d.log("=" * 56)
+    d.log("watch_deals: 广告 %d 次，领取 %d 次" % (ads, claims))
+    d.log("=" * 56)
+    go_home()
+    return ads, claims
+
+
 def watch_ads(max_ads=10, max_minutes=20, replenish_battles=0):
     """
     循环触发并安全观看激励视频。广告来源（全部实测可用）：
@@ -885,7 +1080,7 @@ def upgrade_by_ads(max_ads=12):
 
 
 def goal_ads(rounds=8, minutes=25, lottery=False, replenish=0, wait_cooldown=True,
-             upgrade=False):
+             upgrade=False, deals=False):
     """
     目标一完整流程：
       1) 领取活动任务 + 每日任务里已完成的奖励
@@ -984,10 +1179,20 @@ def goal_ads(rounds=8, minutes=25, lottery=False, replenish=0, wait_cooldown=Tru
     if upgrade:
         total_upgrade = upgrade_by_ads(max_ads=12)
 
+    # ---- 7) 特惠礼包：购物车 → 看广告领前 3 个 ----
+    total_deals = 0
+    if deals:
+        ads2, claims2 = watch_deals_ads(cards=3, replenish=1 if replenish else 0)
+        total_deals = claims2
+        total_watch += ads2
+        total_claim += claims2
+
     go_home()
     d.log("#" * 64)
-    d.log("目标一完成：广告 %d 次，领奖 %d 次，抽奖 %d 次，升级加速 %d 次（-%d 小时）"
-          % (total_watch, total_claim, total_draw, total_upgrade, total_upgrade * 4))
+    d.log("目标一完成：广告 %d 次，领奖 %d 次，抽奖 %d 次，升级加速 %d 次（-%d 小时），"
+          "特惠礼包 %d 个"
+          % (total_watch, total_claim, total_draw, total_upgrade,
+             total_upgrade * 4, total_deals))
     d.log("#" * 64)
     return total_watch, total_claim, total_draw
 
@@ -1501,7 +1706,8 @@ def main():
     ap = argparse.ArgumentParser(description="War Robots 自动化")
     ap.add_argument("action", choices=["ads", "battle", "both", "loop", "state",
                                        "claim", "home", "rating", "history",
-                                       "daily", "lottery", "upgrade", "all"])
+                                       "daily", "lottery", "upgrade", "deals",
+                                       "all"])
     ap.add_argument("--rounds", type=int, default=8)
     ap.add_argument("--seconds", type=int, default=60)
     ap.add_argument("--minutes", type=float, default=25)
@@ -1516,6 +1722,8 @@ def main():
                     help="抽奖冷却时不原地等待")
     ap.add_argument("--draws", type=int, default=3, help="抽奖次数上限")
     ap.add_argument("--max-ads", type=int, default=12, help="升级加速最多看几次广告")
+    ap.add_argument("--cards", type=int, default=3,
+                    help="特惠页只处理前几张礼包卡（默认 3）")
     args = ap.parse_args()
 
     d.ensure_server()
@@ -1559,6 +1767,10 @@ def main():
         n = upgrade_by_ads(max_ads=args.max_ads)
         print("升级加速广告次数: %d（减少约 %d 小时）" % (n, n * 4))
         return 0
+    if args.action == "deals":
+        a2, c2 = watch_deals_ads(cards=args.cards, replenish=args.replenish)
+        print("特惠礼包: 广告 %d 次，领取 %d 次" % (a2, c2))
+        return 0
 
     if args.action == "ads":
         goal_ads(args.rounds, args.minutes, lottery=args.lottery,
@@ -1575,7 +1787,7 @@ def main():
         # 完整日常：领奖 + 广告 + 抽奖 + 升级加速 + 补充战斗
         goal_ads(args.rounds, args.minutes, lottery=True,
                  replenish=args.replenish, wait_cooldown=not args.no_wait,
-                 upgrade=True)
+                 upgrade=True, deals=True)
     elif args.action == "loop":
         # 每轮开始前记录分值，结束后再记录，便于观察难度变化
         get_rating(note="循环前基线")

@@ -100,3 +100,18 @@ sync_to_git.bat "feat: 做了什么改动"      # 同步并提交（自定义信
 ```
 
 仓库位置：`D:\git\warrobots-auto`
+
+
+---
+
+## 特惠礼包（新增）
+
+```powershell
+wr.bat deals                 # 购物车 → 看广告领前 3 个礼包
+wr.bat deals --cards 3       # 明确只做前 3 张（默认）
+wr.bat deals --replenish 1   # 广告用尽时进 1 场战斗补充
+wr.bat all                   # 完整日常已包含特惠礼包
+```
+
+> ⚠️ 特惠页有一个分栏是**真实货币折扣页**，脚本会自动识别并跳过，
+> 绝不会点击付费按钮（已加回归测试保护）。

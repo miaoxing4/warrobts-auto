@@ -87,6 +87,9 @@ def is_ad_activity(pkg, act):
     # 穿山甲 / Pangle
     if "openadsdk" in a or "bytedance" in a or "pangle" in a:
         return True
+    # Meta / Facebook Audience Network（实测会跑在 com.facebook.katana 里）
+    if "audiencenetwork" in a or "facebook.ads" in a or "katana" in a:
+        return True
     if ".tt" in a and ("activity" in a or "ad" in a):
         return True
     return False
@@ -95,6 +98,14 @@ def is_ad_activity(pkg, act):
 def is_bytedance_ad(act):
     a = (act or "").lower()
     return ("openadsdk" in a or "bytedance" in a or "pangle" in a)
+
+
+def is_facebook_ad(pkg, act):
+    """Meta / Facebook Audience Network 广告：只能用 BACK 关闭，可能需要按 2 次"""
+    p = (pkg or "").lower()
+    a = (act or "").lower()
+    return ("facebook" in p or "katana" in p
+            or "audiencenetwork" in a or "facebook.ads" in a)
 
 
 def find_bytedance_close(img):
@@ -256,6 +267,39 @@ def handle_ad(max_seconds=150, verbose=True):
                 continue
 
             if is_admob:
+                # AdMob：版式极不规则且 Install 按钮巨大，只按 BACK
+                if elapsed > 3 and (elapsed - last_back) > 6:
+                    last_back = elapsed
+                    back_tries += 1
+                    d.log("[广告] AdMob：BACK（第 %d 次）" % back_tries)
+                    d.back()
+                    time.sleep(2.5)
+                    if back_tries >= 8:
+                        break
+                    continue
+                if verbose and elapsed - last_log > 5:
+                    last_log = elapsed
+                    d.log("[广告] AdMob 广告处理中 %.0fs" % elapsed)
+                time.sleep(2.0)
+                continue
+
+            # Meta / Facebook Audience Network：同样只用 BACK（有 Ad 1 of 2 多段）
+            if is_facebook_ad(pkg, act):
+                if elapsed > 2 and (elapsed - last_back) > 5:
+                    last_back = elapsed
+                    back_tries += 1
+                    d.log("[广告] Meta：BACK（第 %d 次）" % back_tries)
+                    d.back()
+                    time.sleep(2.2)
+                    if back_tries >= 10:
+                        d.log("[广告] Meta 广告 BACK 多次无效，结束本广告")
+                        break
+                    continue
+                if verbose and elapsed - last_log > 5:
+                    last_log = elapsed
+                    d.log("[广告] Meta 广告处理中 %.0fs" % elapsed)
+                time.sleep(1.5)
+                continue
                 # AdMob：先等待（有些广告需播放几秒才有响应），再用 BACK 关闭
                 if elapsed < 3:
                     time.sleep(1.5)

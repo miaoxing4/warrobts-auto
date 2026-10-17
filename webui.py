@@ -246,6 +246,12 @@ def _upgrade(p):
     return "升级加速 %d 次（约 -%d 小时）" % (n, n * 4)
 
 
+def _deals(p):
+    a2, c2 = e.watch_deals_ads(cards=int(p.get("cards", 3)),
+                               replenish=int(p.get("replenish", 0)))
+    return "特惠礼包：广告 %d 次 / 领取 %d 次" % (a2, c2)
+
+
 def _claim(p):
     if not e.nav_to_tasks():
         return "无法进入活动任务页"
@@ -280,6 +286,7 @@ ACTIONS = {
     "daily":   (_daily, "每日任务：看广告 + 领奖"),
     "lottery": (_lottery, "供给中心抽奖（3 次/天）"),
     "upgrade": (_upgrade, "升级加速：看广告减 4 小时"),
+    "deals":   (_deals, "特惠礼包：看广告领前 3 个"),
     "ads":     (_ads, "广告流程（多来源）"),
     "battle":  (_battle_once, "打一局（≥70 秒）"),
     "loop":    (_loop, "多轮对局 + 记录分值"),
@@ -426,6 +433,7 @@ HTML = r"""<!DOCTYPE html>
         <button data-a="daily"><span class="t">每日任务</span><span class="s">看广告 + 领奖</span></button>
         <button data-a="lottery" class="btn-warn"><span class="t">供给中心抽奖</span><span class="s">3 次/天，含冷却等待</span></button>
         <button data-a="upgrade"><span class="t">升级减时</span><span class="s">看广告 −4 小时升级</span></button>
+        <button data-a="deals"><span class="t">特惠礼包</span><span class="s">购物车 → 看广告领前 3 个</span></button>
         <button data-a="ads"><span class="t">广告流程</span><span class="s">每日/活动/黑市自动切换</span></button>
         <button data-a="all" class="btn-primary"><span class="t">完整日常</span><span class="s">领奖 + 广告 + 抽奖 + 升级</span></button>
       </div>

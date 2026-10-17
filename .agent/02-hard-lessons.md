@@ -376,3 +376,53 @@ if len(seen) >= 3 and len(set(seen[-3:])) == 1:
 
 **教训**：与其为每个"未知卡死界面"加识别规则，
 不如加一个通用的"没进展就重启"的兜底 —— 游戏重启是无害且确定的恢复手段。
+
+---
+
+## 坑 20：特惠页有三个分栏，付费页和广告页混在一起（差点误点真钱购买）
+
+**现象**：按用户描述做「特惠页看广告」时，脚本点了绿色按钮，
+结果**直接拉起 Google Play 支付界面**（`com.android.vending`）。
+
+**根因**：特惠页左侧 1/2/3 三个分栏，**内容会变**：
+- 有的分栏是**广告礼包**（紫色「观看」/ 绿色「获取」，免费）
+- 有的分栏是**限时折扣**（橙色 % 背景，`JP¥80`/`JP¥50`，**真实货币购买**）
+
+两种页面**按钮位置完全一样**（卡中心 x=493/940/1386/1832/2278，按钮 y=815），
+只有背景风格不同。如果盲目按位置点绿色按钮，就会点中真钱购买。
+
+**修复**（`task_ui.deal_page_is_paid`）：用卡片区橙色占比区分，**为真时绝不点任何按钮**：
+
+| 页面 | 卡片区橙色占比 | 青绿背景占比 |
+|---|---|---|
+| 广告礼包页 | **0.001** | 0.39 |
+| 付费折扣页 | **0.172** | 0.17 |
+
+阈值 `> 0.05` 判为付费页。已加回归用例 `deals_paid_page.jpg`。
+
+**另一个教训**：同一功能的不同分栏内容会随时间/进度变化，
+所以**不要硬编码"广告在第 X 栏"**，要遍历所有分栏并逐个判断类型。
+实测第一次进入时广告在第 1 栏，后来跑到了第 2、3 栏。
+
+---
+
+## 坑 21：第四个广告 SDK —— Meta / Facebook Audience Network
+
+**现象**：点特惠页「观看」后，Activity 变成
+`com.facebook.ads.internal.ipc.AudienceNetworkRemoteActivity`，
+**宿主包名是 `com.facebook.katana`（Facebook 应用本身）**，不是游戏。
+
+**修复**：
+- `ad_handler.is_ad_activity` 增加 `audiencenetwork` / `facebook.ads` / `katana`
+- `is_facebook_ad()` → **只用 BACK**，且**要按多次**
+  （实测广告是「Ad 1 of 2」多段式，按 1~6 次才退出，最多见过 7 次）
+- 绝不用角部点击（`SEE DETAILS` 蓝色按钮占屏幕很大，极易误触）
+
+**至此共识别 4 种广告 SDK**：
+
+| SDK | Activity 关键字 | 关闭方式 |
+|---|---|---|
+| AppLovin | `applovin` / `adview` | 动态角部 Next/X，兜底 BACK |
+| AdMob | `gms.ads` / `admob` | 只用 BACK |
+| ByteDance 穿山甲 | `openadsdk` / `bytedance` | 右上灰色圆形 X `(2309,113)`，兜底 BACK |
+| **Meta/Facebook** | `audiencenetwork` / `katana` | **只用 BACK，需多次** |

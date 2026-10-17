@@ -228,6 +228,22 @@ def detect(img=None, save_name=None, keep=True):
         reasons.append("red header %s" % (header,))
         return info
 
+    # 特惠页（机库左侧最下方的购物车进入）
+    # 实测判据：左侧 1/2/3 分栏中有一块**很白的选中标签**
+    #   x[120,285] y[230,520] 内 gray>195 占比：
+    #     特惠页 0.194~0.205 ，其它所有界面 0.000~0.102
+    # 必须早于 battle_prep 判定，否则会被当成"部署界面"（很危险）
+    try:
+        tg = v.to_gray(img[230:520, 120:285])
+        tab_white = float((tg > 195).mean())
+    except Exception:
+        tab_white = 0.0
+    info["tab_white"] = round(tab_white, 3)
+    if tab_white > 0.15 and orange_tr < 0.45:
+        info["state"] = "deals"
+        reasons.append("deals tab_white=%.2f" % tab_white)
+        return info
+
     # 机库
     if orange_tr > 0.45 and sandy < 0.2 and center_sum > 330:
         info["state"] = "hangar"

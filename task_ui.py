@@ -182,6 +182,68 @@ def find_upgrade_ad_button(img):
     }
 
 
+# ============================================================ 特惠页
+# 机库左侧最下方购物车进入的「特惠」页（左侧 1/2/3 分栏）
+# 实测：5 张礼包卡横向排列，底部按钮中心 y=815，卡中心 x 如下
+DEAL_CARD_X = (493, 940, 1386, 1832, 2278)
+DEAL_BTN_Y = 815
+
+
+def deal_page_is_paid(img):
+    """
+    **安全护栏**：区分「广告特惠页」和「付费折扣页」。
+
+    实测：
+      广告页（紫色观看 / 绿色获取） 卡片区橙色占比 **0.001**，青绿背景 0.39
+      付费页（橙色 % 背景、JP¥80/JP¥50）卡片区橙色占比 **0.172**，青绿背景 0.17
+
+    付费页上的按钮是**真实货币购买**，绝不能点（会拉起 Google Play 支付）。
+    返回 True 表示是付费页，调用方必须放弃操作。
+    """
+    h, w = img.shape[:2]
+    card = img[250:700, 250:min(w, 2350)].astype(np.int16)
+    r, g, b = card[:, :, 0], card[:, :, 1], card[:, :, 2]
+    orange = float(((r > 130) & (g > 70) & (g < 180) & (b < 90)
+                    & (r > b + 80)).mean())
+    return orange > 0.05
+
+
+def classify_deal_buttons(img, cards=5):
+    """
+    判断特惠页每张礼包卡底部按钮的类型。
+
+    实测三种状态：
+      watch  紫色「观看」     → 可以看广告（点数如 0/3）
+      claim  绿色「获取」     → 广告看完，可以领取
+      locked 深色「已结束」/🔒 → 不可操作（已领完 / 还没解锁）
+
+    返回 [{'index','x','y','kind','purple','green'}, ...]
+    """
+    out = []
+    h, w = img.shape[:2]
+    for i in range(min(cards, len(DEAL_CARD_X))):
+        cx = DEAL_CARD_X[i]
+        x1, x2 = max(0, cx - 195), min(w, cx + 195)
+        y1, y2 = DEAL_BTN_Y - 30, DEAL_BTN_Y + 40
+        band = img[y1:y2, x1:x2].astype(np.int16)
+        r, g, b = band[:, :, 0], band[:, :, 1], band[:, :, 2]
+        purple = float(((r > 110) & (b > 180) & (b > g + 50)).mean())
+        green = float(((g > 120) & (g > r + 45) & (g > b + 25)).mean())
+        if purple > 0.30:
+            kind = "watch"          # 紫色「观看」= 可看广告
+        elif green > 0.25:
+            kind = "claim"          # 绿色「获取」= 可领取
+        elif purple > 0.04:
+            kind = "unavailable"    # 紫色但变暗「不可用」= 广告暂时用尽（0/3 之类）
+        else:
+            kind = "locked"         # 深色「已结束」/🔒 未解锁
+        out.append({
+            "index": i + 1, "x": cx, "y": DEAL_BTN_Y, "kind": kind,
+            "purple": round(purple, 3), "green": round(green, 3),
+        })
+    return out
+
+
 if __name__ == "__main__":
     CAP = os.path.join(PROJ_DIR, "captures")
     for f in ["62_event_tasks2.png", "L1_tasks.png"]:
