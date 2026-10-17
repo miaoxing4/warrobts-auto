@@ -156,3 +156,51 @@ e.STOP_HOOK = CANCEL.is_set
 3. **停止不是强杀** —— 战斗中会延后；极端情况下最长等到对局结束。
 4. **截图与任务共用 ADB** —— 高频率刷新截图会略微影响任务速度（已用缓存缓解）。
 5. 如果 8765 端口被占用，用 `--port` 换一个。
+
+---
+
+## 坑：改了页面但浏览器还是旧版（端口被旧进程占用）
+
+**现象**：明明改了 `webui.py` 里的 HTML / 加了按钮，重启服务后页面**仍然是旧版**，
+请求 `/` 拿到的 HTML 里没有新按钮。
+
+**根因**：
+1. `/api/stop` 只停止**任务**，**不停服务**。所以旧的服务进程一直在跑并占着 8765。
+2. 新的 `python webui.py` 启动时 **bind 失败**（address already in use），
+   但可能在后台静默退出，看起来像"重启成功"。
+3. 于是浏览器连的还是**旧进程**，页面自然是旧代码。
+
+**排查**：
+
+```powershell
+# 谁占着 8765
+Get-NetTCPConnection -LocalPort 8765 -State Listen | Select-Object OwningProcess
+
+# 所有 webui 进程
+Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
+  Where-Object { $_.CommandLine -like '*webui.py*' } |
+  Select-Object ProcessId, CommandLine
+```
+
+**修复**：
+
+```powershell
+Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
+  Where-Object { $_.CommandLine -like '*webui.py*' } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+# 再重新启动 web.bat
+```
+
+**验证方式**：直接抓页面看按钮列表
+
+```python
+import re, urllib.request
+h = urllib.request.urlopen("http://127.0.0.1:8765/").read().decode()
+print(re.findall(r'data-a="(\w+)"', h))
+```
+
+应当看到 13 个：state home claim rating history battle daily lottery
+upgrade deals ads all loop
+
+**教训**：改前端后不能只靠"重启了"来判断，要**抓页面内容验证**。
+另外不要用 `/api/stop` 当"重启服务"用 —— 它只停任务。
