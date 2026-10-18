@@ -426,3 +426,86 @@ if len(seen) >= 3 and len(set(seen[-3:])) == 1:
 | AdMob | `gms.ads` / `admob` | 只用 BACK |
 | ByteDance 穿山甲 | `openadsdk` / `bytedance` | 右上灰色圆形 X `(2309,113)`，兜底 BACK |
 | **Meta/Facebook** | `audiencenetwork` / `katana` | **只用 BACK，需多次** |
+
+---
+
+## 坑 22：`.bat` 必须是 CRLF 换行
+
+**现象**（用户反馈）：批处理文件在 Windows 上跑不正常。
+
+**根因**：文件被写成了 **LF（unix）换行**。`cmd.exe` 对 `goto :label`、
+`if ... (` 块、多行 `set` 等结构的解析依赖 CRLF，纯 LF 会出现
+跳错标签、块内命令被截断、`pause` 之后行为异常等问题。
+
+**修复**：
+1. 工作区里的 4 个 `.bat` 全部转成 CRLF（`fix_bat_crlf.py`）
+2. `.gitattributes` 里固定规则，保证 checkout 出来就是 CRLF：
+
+```
+*.bat text eol=crlf
+```
+
+**校验方法**（应 CRLF 数 == LF 总数）：
+
+```python
+raw = open("wr.bat", "rb").read()
+print(raw.count(b"\r\n"), raw.count(b"\n"))
+```
+
+**纪律**：以后**新建/改写 `.bat` 后一定要确认 CRLF**。
+写文件的工具默认给 LF，必须显式转换。
+
+---
+
+## 坑 23：无线 ADB 端口每次都在变，长跑进程会"掉线"
+
+**现象**（用户反馈）：手机确定开着无线调试，但脚本报找不到设备。
+
+**根因（三个叠加）**：
+
+1. **mDNS 有延迟**：adb 守护进程刚启动时，UDP 5353 要等几秒才收到广播。
+   实测 `adb start-server` 后立刻 `adb mdns services` 是**空的**，
+   等 8 秒才出现 `adb-16569970-OuYTFO  _adb-tls-connect._tcp  192.168.1.9:40359`。
+   → 原来的脚本只查一次就放弃，所以"找不到手机"。
+
+2. **端口是随机的**：同一台手机实测经历过
+   `39365` → `40359` → `42821`。手机重开无线调试/重启就会变。
+   → 保存的 `.device_serial` 很快失效。
+
+3. **长跑进程不会重新解析串号**：`webui.py` 只在启动时 `resolve_serial()` 一次。
+   端口一变，后台进程的所有命令都报 `device not found`，
+   网页上表现为 `界面=screenshot_failed`。
+
+**修复**（三层）：
+
+1. `wr_wireless.py`：发现改为**轮询重试最多 30 秒**，连不上给出明确的 4 条排查
+2. `device.resolve_serial()`：配置的是无线串号且不在线时，
+   **自动用 mDNS 重新发现并重连**（并更新 `.device_serial`）
+3. `device.adb()`：**带自愈** —— 命令返回"设备不在/离线"时，
+   自动 `resolve_serial()` 后**重试一次**
+   （用 `_HEALING` 标志防递归）
+
+**实测效果**：
+
+```
+断开后 ensure_server() → 1.4s 内重新发现并连接
+人为写入失效串号 (192.168.1.9:1) → 截图调用自动自愈，串号恢复为真实端口
+```
+
+**教训**：无线调试是个"会自己变化"的外部资源，
+任何长期运行的进程都必须具备**失败→重新发现→重试**的能力，
+不能只在启动时解析一次。
+
+---
+
+## 坑 24：Windows 上 adb mDNS 与其它服务抢 UDP 5353
+
+`Get-NetUDPEndpoint -LocalPort 5353` 显示是 adb 自己占着，属正常。
+如果发现不了设备，优先怀疑：
+- 手机上「无线调试」被系统自动关闭（部分机型锁屏/省电会关）
+- 手机与电脑不在同一网段（本例电脑 `192.168.1.11`、手机 `192.168.1.9`）
+- 路由器开了 **AP 隔离**
+- Windows 防火墙拦了 adb 的 UDP 5353
+
+最省事的兜底：**插一次 USB 执行 `wireless.bat tcpip`**，
+改用固定端口 5555，完全不依赖 mDNS。

@@ -97,23 +97,66 @@ def _adb_env():
     return env
 
 
-def adb(*args, timeout=60, binary=False):
-    cmd = [ADB]
-    ser = current_serial()
-    if ser:
-        cmd += ["-s", ser]
-    cmd += list(args)
-    try:
-        p = subprocess.run(cmd, capture_output=True, timeout=timeout,
-                           env=_adb_env())
-        if binary:
-            return p.returncode, p.stdout
-        return p.returncode, p.stdout.decode("utf-8", errors="replace") + \
-            p.stderr.decode("utf-8", errors="replace")
-    except subprocess.TimeoutExpired:
-        return -1, "TIMEOUT"
-    except FileNotFoundError:
-        return -2, "ADB_NOT_FOUND: " + ADB
+# 这些是 adb 的「主机级」命令，不能带 -s 串号
+_HOST_CMDS = ("devices", "connect", "disconnect", "pair", "mdns",
+              "start-server", "kill-server", "version", "keygen",
+              "reconnect", "root", "unroot", "wait-for-device")
+
+_HEALING = {"busy": False}
+
+_OFFLINE_HINTS = ("device not found", "no devices", "device offline",
+                  "not found", "closed", "connection reset",
+                  "cannot connect", "protocol fault")
+
+
+def _looks_offline(rc, out, binary):
+    if rc == 0:
+        return False
+    if binary:
+        # 二进制模式下拿不到文本，靠返回码 + 输出长度判断
+        return True
+    low = (out or "").lower()
+    return any(h in low for h in _OFFLINE_HINTS)
+
+
+def adb(*args, timeout=60, binary=False, use_serial=True):
+    """
+    执行 adb 命令。
+
+    带**自愈**：如果报"设备不在/离线"，会自动重新发现设备（无线端口是随机的，
+    长时间运行的进程里串号会失效）并重试一次。
+    """
+    def _run():
+        cmd = [ADB]
+        ser = current_serial()
+        if use_serial and ser and args and args[0] not in _HOST_CMDS:
+            cmd += ["-s", ser]
+        cmd += list(args)
+        try:
+            p = subprocess.run(cmd, capture_output=True, timeout=timeout,
+                               env=_adb_env())
+            if binary:
+                return p.returncode, p.stdout
+            return p.returncode, (p.stdout.decode("utf-8", errors="replace")
+                                  + p.stderr.decode("utf-8", errors="replace"))
+        except subprocess.TimeoutExpired:
+            return -1, ("TIMEOUT" if not binary else b"")
+        except FileNotFoundError:
+            return -2, ("ADB_NOT_FOUND: " + ADB if not binary else b"")
+
+    rc, out = _run()
+    if (not _HEALING["busy"] and args and args[0] not in _HOST_CMDS
+            and _looks_offline(rc, out, binary)):
+        _HEALING["busy"] = True
+        try:
+            new = resolve_serial(auto_wireless=True)
+            if new or current_serial() != get_serial():
+                pass
+        finally:
+            _HEALING["busy"] = False
+        rc2, out2 = _run()
+        return rc2, out2
+    return rc, out
 
 
 def shell(cmd, timeout=60):
@@ -125,16 +168,7 @@ def ensure_server():
     resolve_serial()
 
 
-def resolve_serial():
-    """
-    校验当前配置的串号是否真的在线。
-    * 配置的串号在线          → 保持不变
-    * 配置的串号不在线        → 若恰好只有 1 台设备，自动改用那一台
-    * 没有配置                → 不指定（单设备时 adb 自动选中）
-    返回最终使用的串号（或 None 表示不指定）。
-    """
-    global _serial
-    want = current_serial()
+def _alive_devices():
     rc, out = adb("devices", "-l", timeout=30)
     alive = []
     for line in out.splitlines():
@@ -144,24 +178,86 @@ def resolve_serial():
         parts = line.split()
         if len(parts) >= 2 and parts[1] == "device":
             alive.append(parts[0])
+    return alive
+
+
+def wireless_reconnect(timeout=30, verbose=True):
+    """
+    通过 mDNS 重新发现并连接无线设备。
+
+    踩坑：无线调试的端口是**随机**的（实测 39365 → 40359 变过），
+    手机重开无线调试/重启后旧串号必然失效；
+    而且 adb 守护进程刚启动时 mDNS 需要几秒才能发现服务。
+    所以这里做**轮询重试**。
+    返回新串号或 None。
+    """
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        rc, out = adb("mdns", "services", timeout=20)
+        for line in out.splitlines():
+            if "_adb-tls-connect" not in line:
+                continue
+            addr = line.split()[-1]
+            if verbose:
+                print("[device] 发现无线设备 %s，尝试连接..." % addr)
+            adb("connect", addr, timeout=25)
+            time.sleep(1.2)
+            if addr in _alive_devices():
+                set_serial(addr, persist=True)
+                if verbose:
+                    print("[device] 无线已连接并保存串号: %s" % addr)
+                return addr
+        time.sleep(3)
+    if verbose:
+        print("[device] %d 秒内没发现无线设备。"
+              "请确认手机「无线调试」开着、和电脑同一 Wi-Fi；"
+              "或用 USB 插一次执行 wireless.bat tcpip" % timeout)
+    return None
+
+
+def resolve_serial(auto_wireless=True):
+    """
+    校验当前配置的串号是否真的在线，必要时自动修复。
+
+    * 配置的串号在线                  → 保持不变
+    * 配置的是无线串号且不在线        → **自动用 mDNS 重新发现并重连**
+    * 配置的串号不在线、只有 1 台在线 → 自动改用那一台
+    * 没有配置                        → 单设备时自动选中；否则尝试无线重连
+    返回最终使用的串号（或 None 表示不指定）。
+    """
+    global _serial
+    want = current_serial()
+    alive = _alive_devices()
 
     if want and want in alive:
         return want
+
+    # 无线串号失效 → 自动重连（端口会变）
+    if auto_wireless and (want is None or ":" in (want or "")):
+        if not alive:
+            new = wireless_reconnect(timeout=20)
+            if new:
+                return new
+            if want:
+                return want      # 保留旧串号，等设备恢复
+            return None
+
     if want and want not in alive:
         if len(alive) == 1:
             print("[device] 配置的串号 %s 不在线，自动改用 %s" % (want, alive[0]))
             set_serial(alive[0], persist=True)
             return alive[0]
-        if not alive:
-            return want          # 保留，等设备上线
-        # 多台但不含配置的那台：清掉配置，交给 adb 报错提示
         print("[device] 配置的串号 %s 不在线，改为自动选择" % want)
         set_serial("", persist=False)
         _serial = None
         return None
-    # 没有配置
+
     if len(alive) == 1:
         return alive[0]
+    if not alive and auto_wireless:
+        new = wireless_reconnect(timeout=15)
+        if new:
+            return new
     return None
 
 

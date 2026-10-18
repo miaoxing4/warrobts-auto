@@ -35,6 +35,7 @@ def sh(*args, timeout=60):
 
 
 def show_devices():
+    time.sleep(0.6)          # 刚连上时设备列表可能还没刷新
     rc, out = sh("devices", "-l")
     print(out.strip() or "(无)")
 
@@ -107,7 +108,8 @@ def main():
     ap.add_argument("--forget", action="store_true", help="清除已保存的串号")
     args = ap.parse_args()
 
-    d.ensure_server()
+    # 只启动 adb 服务，不做自动重连（本脚本自己负责发现与连接）
+    sh("start-server", timeout=30)
 
     if args.forget:
         p = os.path.join(PROJ, ".device_serial")
@@ -162,34 +164,29 @@ def main():
             return 0
         return 1
 
-    print("通过 mDNS 发现无线调试设备 ...")
-    svcs = mdns_services()
-    if not svcs:
-        print("未发现。请确认：")
-        print("  1) 手机设置 → 开发者选项 → 无线调试 已打开")
-        print("  2) 手机和电脑在同一 Wi-Fi 网段")
-        print("  3) 或者用 USB 插上后执行: python wr_wireless.py --tcpip 5555")
-        return 1
-
-    addr = None
-    for name, svc, a in svcs:
-        print("  发现 %-28s %-24s %s" % (name, svc, a))
-        if "_adb-tls-connect" in svc and addr is None:
-            addr = a
-
+    print("通过 mDNS 发现无线调试设备（最多等 30 秒）...")
+    print("提示：adb 守护进程刚启动时 mDNS 要几秒才收到广播，属正常现象。")
+    addr = d.wireless_reconnect(timeout=30, verbose=True)
     if not addr:
-        print("没有可用的 _adb-tls-connect 服务")
+        svcs = mdns_services()
+        if svcs:
+            print("\n发现到服务但连接失败，可能未配对：")
+            for name, svc, a in svcs:
+                print("   %-28s %-24s %s" % (name, svc, a))
+            print("\n首次使用请配对（手机「无线调试 → 使用配对码配对设备」）：")
+            print("  wireless.bat pair <IP:端口> <6位码>")
+        else:
+            print("\n没有发现任何无线调试服务。请确认：")
+            print("  1) 手机 开发者选项 → 无线调试 已打开（且手机屏幕亮着）")
+            print("  2) 手机和电脑在同一 Wi-Fi 网段（本机 192.168.1.11）")
+            print("  3) 路由器未开启「AP 隔离 / 客户端隔离」")
+            print("  4) Windows 防火墙允许 adb 用 UDP 5353（mDNS）")
+            print("\n最省事的办法：插一次 USB 后执行  wireless.bat tcpip")
         return 1
 
-    if not do_connect(addr):
-        print("\n连接失败。若这是第一次连接，需要先配对：")
-        print("  手机上：无线调试 → 使用配对码配对设备（会显示 IP:端口 和 6 位码）")
-        print("  电脑上：python wr_wireless.py --pair <IP:端口> <6位码>")
-        return 1
-
-    d.set_serial(addr)
     print("\n已保存串号:", addr)
-    print("提示：该串号含随机端口，手机重启或重开无线调试后会变化，重跑本脚本即可。")
+    print("提示：无线端口是随机的，手机重启或重开无线调试后会变；")
+    print("      engine/webui 启动时会自动重新发现，无需手动处理。")
     show_devices()
     return 0
 
