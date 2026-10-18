@@ -377,53 +377,76 @@ def start_tap_worker():
     return t
 
 
-def get_ui_state(max_age=None):
+_frame = {"ts": 0.0, "jpeg": None, "state": None, "busy": False}
+_frame_lock = threading.Lock()
+
+
+def _update_frame():
+    """真正抓一帧（可能很慢，无线下实测 5~15s），只在后台线程里跑"""
+    with _frame_lock:
+        if _frame["busy"]:
+            return
+        _frame["busy"] = True
+    try:
+        with DEV_LOCK:
+            try:
+                arr, _ = d.screenshot(None, save=False)
+            except Exception:
+                arr = None
+        if arr is None:
+            return
+        try:
+            st = _orig_detect(img=arr)["state"]
+        except Exception:
+            st = _frame["state"]
+        try:
+            from PIL import Image
+            buf = io.BytesIO()
+            Image.fromarray(arr).save(buf, format="JPEG", quality=70)
+            _frame["jpeg"] = buf.getvalue()
+        except Exception:
+            pass
+        _frame["state"] = st
+        _frame["ts"] = time.time()
+    finally:
+        with _frame_lock:
+            _frame["busy"] = False
+
+
+def refresh_frame(max_age=None):
     """
-    带缓存的界面识别。
-    注意：webui 里用的是**未被取消包装**的 _orig_detect，
-    避免把控制台自己的轮询也算进任务取消判定。
+    返回 (jpeg, state)。
+
+    **stale-while-revalidate**：只要手里有旧帧就立刻返回，
+    同时在后台线程刷新下一帧。这样即使无线下抓一帧要 10 秒以上，
+    网页也不会被阻塞（原本 status 接口会被拖到 15s 超时）。
+
+    只有在完全没有任何帧（进程刚启动）时才同步抓一次。
     """
     if max_age is None:
-        max_age = _ttl(STATE_TTL)
+        max_age = _ttl(SHOT_TTL)
     now = time.time()
-    if _state_cache["v"] and (now - _state_cache["ts"]) < max_age:
-        return _state_cache["v"]
-    if RUNNER.is_running() and _state_cache["v"]:
-        # 任务在跑就别抢设备了，直接用上次的值
-        return _state_cache["v"]
-    with DEV_LOCK:
-        try:
-            st = _orig_detect(keep=False)["state"]
-        except Exception:
-            st = _state_cache["v"]
-    _state_cache["v"] = st
-    _state_cache["ts"] = time.time()
+
+    if _frame["jpeg"]:
+        if (now - _frame["ts"]) >= max_age and not _frame["busy"]:
+            threading.Thread(target=_update_frame, daemon=True,
+                             name="frame-update").start()
+        return _frame["jpeg"], _frame["state"]
+
+    _update_frame()          # 首帧，只能同步等
+    return _frame["jpeg"], _frame["state"]
+
+
+def get_ui_state(max_age=None):
+    """界面状态（与画面同一帧，保证一致）"""
+    _, st = refresh_frame(max_age)
     return st
 
 
 def get_screenshot(max_age=None):
-    """返回 JPEG bytes（带缓存 + 串行锁，减少无线下的排队）"""
-    if max_age is None:
-        max_age = _ttl(SHOT_TTL)
-    with _shot_lock:
-        now = time.time()
-        if _shot_cache["png"] and (now - _shot_cache["ts"]) < max_age:
-            return _shot_cache["png"]
-        with DEV_LOCK:
-            try:
-                from PIL import Image
-                arr, _ = d.screenshot(None, save=False)
-                if arr is None:
-                    return _shot_cache["png"]
-                im = Image.fromarray(arr)
-                buf = io.BytesIO()
-                im.save(buf, format="JPEG", quality=70)
-                png = buf.getvalue()
-                _shot_cache["png"] = png
-                _shot_cache["ts"] = time.time()
-            except Exception:
-                pass
-        return _shot_cache["png"]
+    """手机画面 JPEG bytes"""
+    jpeg, _ = refresh_frame(max_age)
+    return jpeg
 
 
 # ============================================================ 页面
