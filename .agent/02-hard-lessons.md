@@ -576,3 +576,33 @@ AppLovin / AdMob / ByteDance 穿山甲 / Meta(Facebook) / **Yandex**。
 **注意**：竖屏广告会让截图变成 1080x2400，
 所有按横屏标定的区域阈值都会越界（触发 numpy "Mean of empty slice"）。
 已在 `ui_state.detect()` 加竖屏保护：`h > w` 时直接返回 `unknown`。
+
+---
+
+## 坑 27：频繁替换 blob URL 会把画面刷成空白
+
+**现象**：网页手机画面间歇性变成空白/破图。
+
+**根因**：刷新逻辑在 `img.onload` 里 revoke **上一张**的 blob URL，
+但两次刷新间隔很短时，闭包里的"上一张"可能正是**当前正在显示**的那张，
+一 revoke 就空白了。
+
+**修复**：用模块级 `curShotUrl` 记录当前真正在用的 URL，
+**等新图 onload 成功之后**才 revoke 旧的；加载失败则 revoke 新的、保留旧画面。
+
+```js
+const url = URL.createObjectURL(blob);
+const prev = curShotUrl;
+await new Promise(res => { img.onload = fin; img.onerror = fin; img.src = url; });
+if (img.naturalWidth > 0) {
+  curShotUrl = url;
+  if (prev && prev !== url) URL.revokeObjectURL(prev);
+} else {
+  URL.revokeObjectURL(url);   // 保留旧画面，不闪白
+}
+```
+
+加 8 秒超时保护，避免 onload 永不触发时卡死。
+
+**教训**：凡是"定时替换资源 URL"的场景，都要明确
+**新资源加载完成 → 再释放旧资源**的顺序。

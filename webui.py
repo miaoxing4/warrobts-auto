@@ -766,8 +766,11 @@ function updateTapBadge(n){
   el.className = 'badge ' + ((n || 0) > 0 ? 'b-run' : 'b-idle');
 }
 
-/* ---------------- 画面刷新（可调频率，点完不强制刷新） ---------------- */
-let shotTimer = null;
+/* ---------------- 画面刷新（可调频率，点完不强制刷新） ----------------
+   注意 blob URL 的生命周期：必须等新图 onload 之后再 revoke 旧的，
+   否则连续刷新时会把正在显示的 URL 提前释放 → 画面变空白（实测踩过）。 */
+let shotTimer = null, curShotUrl = null;
+
 async function refreshShot(){
   try{
     const r = await fetch('/api/shot?t=' + Date.now());
@@ -776,12 +779,21 @@ async function refreshShot(){
     if(blob.size < 500) return;
     const img = $('#shot');
     const url = URL.createObjectURL(blob);
-    const old = img.src;
-    img.onload = ()=>{
+    const prev = curShotUrl;
+    await new Promise(res=>{
+      let done = false;
+      const fin = ()=>{ if(!done){ done = true; res(); } };
+      img.onload = fin; img.onerror = fin;
+      img.src = url;
+      setTimeout(fin, 8000);          // 超时保护
+    });
+    if (img.naturalWidth > 0) {
       lastW = img.naturalWidth; lastH = img.naturalHeight;
-      if (old && old.startsWith('blob:')) URL.revokeObjectURL(old);
-    };
-    img.src = url;
+      curShotUrl = url;
+      if (prev && prev !== url) URL.revokeObjectURL(prev);
+    } else {
+      URL.revokeObjectURL(url);       // 没加载成功，直接释放，保留旧画面
+    }
   }catch(e){}
 }
 function setShotRate(){
