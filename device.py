@@ -22,6 +22,13 @@ SW, SH = 2400, 1080
 
 # 截图短缓存（供 screenshot 使用；输入动作会清空）
 _shot_cache = {"t": 0.0, "arr": None}
+# 安全窗口（锁屏 / DRM）会让 screencap 返回空 → 视觉判定全部失效
+_last_secure = {"v": False}
+
+
+def screen_secure():
+    """上一次截图是否被安全窗口屏蔽（锁屏 / FLAG_SECURE）"""
+    return _last_secure["v"]
 
 
 def invalidate_shot_cache():
@@ -320,7 +327,82 @@ def is_foreground(pkg=PKG):
     return p == pkg
 
 
-def screenshot(name=None, save=True, use_cache=True):
+# ---------------------------------------------------------------- 保活（防休眠）
+def is_awake():
+    out = shell("dumpsys power")[1]
+    for line in out.splitlines():
+        if "mWakefulness=" in line:
+            return "Awake" in line
+    return True
+
+
+def wake():
+    """
+    唤醒屏幕并解除锁屏。
+
+    实测（realme / ColorOS）：仅 WAKEUP + `wm dismiss-keyguard` 不够，
+    会停在锁屏界面（竖屏时钟 + 锁图标），此时：
+      * 背后的 App（如广告 Activity）完全看不到
+      * input 事件被锁屏吞掉 → BACK 毫无反应
+    再加「上滑解锁」和「菜单键」两道兜底。
+    """
+    shell("input keyevent KEYCODE_WAKEUP")
+    time.sleep(0.7)
+    shell("wm dismiss-keyguard")
+    time.sleep(0.6)
+    shell("input swipe 540 1900 540 700 180")   # 上滑解锁（锁屏是竖屏）
+    time.sleep(0.7)
+    shell("input keyevent 82")                  # MENU 键，部分机型可解除
+    time.sleep(0.5)
+
+
+def is_locked():
+    """判断是否停在锁屏（Keyguard）"""
+    pkg, act = top_activity()
+    a = (act or "").lower()
+    p = (pkg or "").lower()
+    return ("keyguard" in a or "keyguard" in p
+            or "notification shade" in a)
+
+
+def keep_awake(timeout=2147483647):
+    """
+    防止手机休眠 / 锁屏（很重要）。
+
+    实测问题：息屏后 screencap 全黑（均值 0~3）、input 被吞；
+    锁屏后背后 App 完全不可见 —— 自动化会"看起来在跑但什么都点不到"。
+
+    做四件事：
+      1. 关闭锁屏（locksettings set-disabled true）
+      2. 屏幕超时设为最大值
+      3. 保持常亮（svc power stayon true）
+      4. 当前不亮或已锁屏 → 唤醒 + 解锁
+    """
+    try:
+        shell("locksettings set-disabled true")
+    except Exception:
+        pass
+    try:
+        shell("settings put secure lockscreen.disabled 1")
+    except Exception:
+        pass
+    try:
+        shell("settings put system screen_off_timeout %d" % timeout)
+    except Exception:
+        pass
+    try:
+        shell("svc power stayon true")
+    except Exception:
+        pass
+    try:
+        if not is_awake() or is_locked():
+            wake()
+    except Exception:
+        pass
+    return True
+
+
+def screenshot(name=None, save=True, use_cache=True, _black_retry=False):
     """
     截图，返回 (RGB numpy 数组 或 None, 保存路径 或 None)。
 
@@ -378,7 +460,26 @@ def screenshot(name=None, save=True, use_cache=True):
                 arr = None
 
     if arr is None:
+        # 区分：设备正常但画面被安全窗口屏蔽（锁屏/DRM）→ 标记出来
+        try:
+            rc3, tiny = adb("exec-out", "screencap -p", binary=True, timeout=20)
+            _last_secure["v"] = (rc3 == 0 and not tiny)
+        except Exception:
+            _last_secure["v"] = False
         return None, None
+    _last_secure["v"] = False
+
+    # 黑屏自愈：息屏时 screencap 全黑（实测均值 0.0~2.7），
+    # 此时所有视觉判定都会失效，且 input 事件被系统吞掉。
+    try:
+        import numpy as _np
+        if float(arr.mean()) < 3.0 and not _black_retry:
+            wake()
+            time.sleep(1.2)
+            return screenshot(name=name, save=save, use_cache=False,
+                              _black_retry=True)
+    except Exception:
+        pass
 
     _shot_cache["arr"] = arr
     _shot_cache["t"] = now

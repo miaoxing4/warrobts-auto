@@ -90,6 +90,9 @@ def is_ad_activity(pkg, act):
     # Meta / Facebook Audience Network（实测会跑在 com.facebook.katana 里）
     if "audiencenetwork" in a or "facebook.ads" in a or "katana" in a:
         return True
+    # Yandex Mobile Ads（实测 com.yandex.mobile.ads.common.AdActivity，常为竖屏）
+    if "yandex" in a or "mobileads" in a:
+        return True
     if ".tt" in a and ("activity" in a or "ad" in a):
         return True
     return False
@@ -98,6 +101,12 @@ def is_ad_activity(pkg, act):
 def is_bytedance_ad(act):
     a = (act or "").lower()
     return ("openadsdk" in a or "bytedance" in a or "pangle" in a)
+
+
+def is_yandex_ad(pkg, act):
+    """Yandex Mobile Ads：多为竖屏插屏，BACK 关闭最稳"""
+    a = (act or "").lower()
+    return ("yandex" in a or "mobileads" in a)
 
 
 def is_facebook_ad(pkg, act):
@@ -283,8 +292,8 @@ def handle_ad(max_seconds=150, verbose=True):
                 time.sleep(2.0)
                 continue
 
-            # Meta / Facebook Audience Network：同样只用 BACK（有 Ad 1 of 2 多段）
-            if is_facebook_ad(pkg, act):
+            # Meta / Facebook / Yandex：只用 BACK（Meta 有多段，Yandex 常竖屏）
+            if is_facebook_ad(pkg, act) or is_yandex_ad(pkg, act):
                 if elapsed > 2 and (elapsed - last_back) > 5:
                     last_back = elapsed
                     back_tries += 1

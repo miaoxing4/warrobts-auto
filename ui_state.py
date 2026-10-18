@@ -171,6 +171,10 @@ def detect(img=None, save_name=None, keep=True):
     if img is None:
         img, path = d.screenshot(save_name, save=keep)
         if img is None:
+            # 锁屏 / DRM 等安全窗口会让 screencap 返回空，此时视觉判定无从谈起
+            if getattr(d, "screen_secure", lambda: False)():
+                return {"state": "locked", "activity": None, "img": None,
+                        "reasons": ["屏幕被安全窗口屏蔽（锁屏？请解锁手机）"]}
             return {"state": "screenshot_failed", "activity": None, "img": None, "reasons": []}
     pkg, act = d.top_activity()
     act_s = (act or "")
@@ -181,7 +185,9 @@ def detect(img=None, save_name=None, keep=True):
     a_low = act_s.lower()
     if ("applovin" in a_low or "adview" in a_low
             or "gms.ads" in a_low or "admob" in a_low
-            or "openadsdk" in a_low or "bytedance" in a_low or "pangle" in a_low):
+            or "openadsdk" in a_low or "bytedance" in a_low or "pangle" in a_low
+            or "yandex" in a_low or "mobileads" in a_low
+            or "audiencenetwork" in a_low or "facebook.ads" in a_low):
         info["state"] = "ad"
         reasons.append("ad activity: %s" % act_s)
         return info
@@ -192,6 +198,19 @@ def detect(img=None, save_name=None, keep=True):
     if pkg and pkg != d.PKG:
         info["state"] = "launcher" if "launcher" in pkg else "foreign_app"
         reasons.append("pkg=%s" % pkg)
+        return info
+
+    # ---- 1.5) 竖屏保护 ----
+    # 后续所有区域阈值都是按横屏 2400x1080 标定的。
+    # 若截图是竖屏（手机停在某个竖屏 App 上），区域会越界产生空切片，
+    # 触发 numpy "Mean of empty slice" 警告且判定全部失效。这里给保守结果。
+    try:
+        ih, iw = img.shape[:2]
+    except Exception:
+        ih, iw = 0, 0
+    if ih > iw:
+        info["state"] = "unknown"
+        reasons.append("portrait %dx%d（阈值仅适用横屏）" % (iw, ih))
         return info
 
     # ---- 2) 度量 ----

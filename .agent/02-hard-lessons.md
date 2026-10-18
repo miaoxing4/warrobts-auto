@@ -509,3 +509,70 @@ print(raw.count(b"\r\n"), raw.count(b"\n"))
 
 最省事的兜底：**插一次 USB 执行 `wireless.bat tcpip`**，
 改用固定端口 5555，完全不依赖 mDNS。
+
+---
+
+## 坑 25：手机休眠/锁屏会让自动化"看起来在跑但什么都点不到"
+
+**现象**：一段时间后，`screencap` 全黑（均值 0~2.7）或直接**返回空**，
+点击无效，日志里 BACK 按了十几次也没反应。
+
+**根因（两个阶段）**：
+
+1. **Dozing（休眠）**：`mWakefulness=Dozing`。
+   息屏后 `screencap` 得到全黑图，`input` 事件被系统吞掉。
+
+2. **安全锁屏**：设备锁屏后 `screencap` **返回 0 字节**
+   （锁屏窗口有 FLAG_SECURE，系统直接屏蔽截图）。
+   此时背后即使有广告 Activity 也完全不可见，
+   `input keyevent` 全部无效 —— 我试了 WAKEUP / dismiss-keyguard /
+   上滑 / MENU / ENTER / HOME 六种方式，**全都不行**，
+   因为设备设了密码，必须人工解锁。
+
+**修复**：
+
+```python
+# device.py
+def keep_awake():
+    shell("locksettings set-disabled true")          # 关掉锁屏
+    shell("settings put secure lockscreen.disabled 1")
+    shell("settings put system screen_off_timeout 2147483647")  # 永不息屏
+    shell("svc power stayon true")                    # 充电时常亮
+    if not is_awake() or is_locked(): wake()
+```
+
+另外 `screenshot()` 加了**黑屏自愈**：均值 < 3 时自动 `wake()` 并重试一次。
+
+**检测**（很重要，否则会静默失败）：
+
+```python
+_last_secure = {"v": False}   # screencap 返回空 → 判定为安全窗口
+def screen_secure(): ...
+```
+
+`ui_state.detect()` 在截图失败且 `screen_secure()` 为真时返回
+**`locked`** 状态（而不是含糊的 `screenshot_failed`），
+网页会弹出"手机锁屏中，请在手机上解锁"的遮罩 + 「尝试唤醒」按钮。
+
+**教训**：
+- 长跑自动化必须处理"屏幕会休眠/锁屏"这个现实问题，
+  否则会得到大量莫名其妙的失败。
+- `screencap` 返回**空**和返回**全黑**是两种不同故障：
+  空 = 安全窗口（锁屏/DRM），全黑 = 息屏。
+- 设了密码的设备，锁屏后**无法自动解锁**，必须人工介入。
+
+---
+
+## 坑 26：第五种广告 SDK —— Yandex Mobile Ads
+
+`com.yandex.mobile.ads.common.AdActivity`，常见为**竖屏插屏**。
+
+- 已加入 `is_ad_activity`（关键字 `yandex` / `mobileads`）
+- 关闭策略：**BACK**（与 Meta 同组，`is_facebook_ad or is_yandex_ad`）
+
+至此共 5 种：
+AppLovin / AdMob / ByteDance 穿山甲 / Meta(Facebook) / **Yandex**。
+
+**注意**：竖屏广告会让截图变成 1080x2400，
+所有按横屏标定的区域阈值都会越界（触发 numpy "Mean of empty slice"）。
+已在 `ui_state.detect()` 加竖屏保护：`h > w` 时直接返回 `unknown`。

@@ -246,6 +246,15 @@ def _upgrade(p):
     return "升级加速 %d 次（约 -%d 小时）" % (n, n * 4)
 
 
+def _wake(p):
+    """唤醒屏幕 / 解除锁屏 / 设保活"""
+    d.keep_awake()
+    d.wake()
+    time.sleep(1.0)
+    st = _orig_detect(keep=False)["state"]
+    return "唤醒后界面：%s" % st
+
+
 def _deals(p):
     a2, c2 = e.watch_deals_ads(cards=int(p.get("cards", 3)),
                                replenish=int(p.get("replenish", 0)))
@@ -281,6 +290,7 @@ def _home(p):
 
 ACTIONS = {
     "state":   (lambda p: e.go_home() and _state(p), "识别当前界面"),
+    "wake":    (_wake, "唤醒屏幕 / 解除锁屏"),
     "home":    (_home, "回到机库"),
     "claim":   (_claim, "领取活动任务奖励"),
     "daily":   (_daily, "每日任务：看广告 + 领奖"),
@@ -316,6 +326,55 @@ DEV_LOCK = threading.Lock()
 def _ttl(base):
     """任务运行中时把缓存时间放大，避免控制台轮询和任务抢设备（无线下尤其要紧）"""
     return base * 3.0 if RUNNER.is_running() else base
+
+
+# ============================================================ 远程点击（排队执行）
+# 设计目的：在网页画面上点击 → 点击先入队 → 后台线程按顺序慢慢发给手机。
+# 这样控制端不需要为了"确认效果"立刻请求新截图，
+# 在无线 / 高延迟环境下不会把带宽和 adb 压满。
+TAP_QUEUE = collections.deque()
+TAP_COND = threading.Condition()
+TAP_GAP = 0.15          # 两次点击之间的最小间隔（秒）
+TAP_STATS = {"done": 0, "fail": 0, "last": None}
+
+
+def enqueue_tap(x, y):
+    with TAP_COND:
+        TAP_QUEUE.append((float(x), float(y), time.time()))
+        n = len(TAP_QUEUE)
+        TAP_COND.notify()
+    return n
+
+
+def queue_len():
+    with TAP_COND:
+        return len(TAP_QUEUE)
+
+
+def _tap_worker():
+    """后台线程：按顺序执行排队的点击，与截图共用 DEV_LOCK 避免争抢"""
+    while True:
+        with TAP_COND:
+            while not TAP_QUEUE:
+                TAP_COND.wait()
+            x, y, t_enq = TAP_QUEUE.popleft()
+        try:
+            with DEV_LOCK:
+                d.tap(int(round(x)), int(round(y)))
+            TAP_STATS["done"] += 1
+            TAP_STATS["last"] = (int(x), int(y))
+            lag = time.time() - t_enq
+            d.log("远程点击 (%d,%d) 队列延迟 %.2fs" % (x, y, lag))
+        except Exception as ex:
+            TAP_STATS["fail"] += 1
+            d.log("远程点击失败 (%d,%d): %s" % (x, y, ex))
+        time.sleep(TAP_GAP)
+
+
+def start_tap_worker():
+    t = threading.Thread(target=_tap_worker, daemon=True, name="tap-worker")
+    t.start()
+    return t
 
 
 def get_ui_state(max_age=None):
@@ -381,100 +440,175 @@ HTML = r"""<!DOCTYPE html>
     --warn:#d29922; --err:#f85149; --purple:#a371f7;
   }
   *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--txt);
-       font:14px/1.55 "Segoe UI","Microsoft YaHei",system-ui,sans-serif}
-  header{display:flex;align-items:center;gap:14px;padding:12px 18px;
-         background:var(--panel);border-bottom:1px solid var(--line);
-         position:sticky;top:0;z-index:5}
-  header h1{font-size:16px;margin:0;font-weight:600}
-  .badge{padding:3px 10px;border-radius:99px;font-size:12px;font-weight:600}
+  html,body{height:100%;margin:0}
+  body{background:var(--bg);color:var(--txt);overflow:hidden;
+       display:flex;flex-direction:column;
+       font:14px/1.5 "Segoe UI","Microsoft YaHei",system-ui,sans-serif}
+
+  /* ---------------- 顶栏 ---------------- */
+  header{flex:0 0 auto;display:flex;align-items:center;gap:10px;
+         padding:7px 14px;background:var(--panel);
+         border-bottom:1px solid var(--line)}
+  header h1{font-size:15px;margin:0;font-weight:600;white-space:nowrap}
+  .ver{color:#6e7681;font-size:11px}
+  .badge{padding:2px 9px;border-radius:99px;font-size:12px;font-weight:600;
+         white-space:nowrap}
   .b-idle{background:#21262d;color:var(--dim)}
   .b-run{background:#1f6feb33;color:#79c0ff;border:1px solid #1f6feb}
   .b-ok{background:#2ea04326;color:var(--ok);border:1px solid #2ea043}
   .b-err{background:#f8514926;color:var(--err);border:1px solid #f85149}
   .spacer{flex:1}
-  main{display:grid;grid-template-columns:minmax(0,1fr) 420px;gap:14px;padding:14px}
-  @media(max-width:1100px){main{grid-template-columns:1fr}}
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;
-        padding:14px}
-  .card h2{font-size:13px;margin:0 0 12px;color:var(--dim);
-           text-transform:uppercase;letter-spacing:.06em;font-weight:600}
-  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
-  button{font:inherit;cursor:pointer;border-radius:8px;border:1px solid var(--line);
-         background:var(--panel2);color:var(--txt);padding:11px 12px;
-         text-align:left;transition:.15s;line-height:1.35}
-  button:hover:not(:disabled){border-color:var(--acc);background:#22304a}
-  button:disabled{opacity:.42;cursor:not-allowed}
-  button .t{display:block;font-weight:600;font-size:14px}
-  button .s{display:block;font-size:11px;color:var(--dim);margin-top:3px}
+  header button{padding:6px 13px;font-size:13px;border-radius:7px;cursor:pointer;
+                border:1px solid var(--line);background:var(--panel2);color:var(--txt)}
+  header button:disabled{opacity:.4;cursor:not-allowed}
+  .btn-danger{border-color:#8b2d2d;background:#4a1d1d}
+  .btn-danger:hover:not(:disabled){background:#6e2b2b}
+  select{background:#0d1117;color:var(--txt);border:1px solid var(--line);
+         border-radius:6px;padding:4px 6px;font:inherit;font-size:12px}
+
+  /* ---------------- 上半屏：手机画面 ---------------- */
+  #stage{flex:1 1 60%;min-height:0;background:#000;position:relative;
+         overflow:hidden;border-bottom:1px solid var(--line)}
+  #wrap{position:absolute;inset:0;display:flex;align-items:center;
+        justify-content:center}
+  #shot{max-width:100%;max-height:100%;object-fit:contain;display:block;
+        user-select:none;-webkit-user-select:none;-webkit-user-drag:none;
+        cursor:crosshair}
+  #shot.noclick{cursor:default}
+  #lockedMask{position:absolute;inset:0;display:none;align-items:center;
+      justify-content:center;background:#000000d9;z-index:5}
+  #lockedMask.show{display:flex}
+  .lockBox{text-align:center;background:#161b22;border:1px solid #8b2d2d;
+      border-radius:12px;padding:22px 30px;max-width:420px}
+  #hint{position:absolute;left:8px;bottom:6px;font-size:11px;color:#9aa4b2;
+        background:#000a;padding:3px 8px;border-radius:6px;
+        pointer-events:none;font-family:Consolas,monospace}
+  .mark{position:absolute;width:36px;height:36px;margin:-18px 0 0 -18px;
+        border:2px solid #2f81f7;border-radius:50%;pointer-events:none;
+        animation:pop .55s ease-out forwards}
+  .mark:before,.mark:after{content:'';position:absolute;background:#2f81f7}
+  .mark:before{left:50%;top:5px;bottom:5px;width:2px;margin-left:-1px}
+  .mark:after{top:50%;left:5px;right:5px;height:2px;margin-top:-1px}
+  @keyframes pop{0%{transform:scale(.45);opacity:1}
+                 100%{transform:scale(1.7);opacity:0}}
+
+  /* ---------------- 下半屏：控制区 ---------------- */
+  #deck{flex:1 1 40%;min-height:0;overflow-y:auto;padding:10px 12px;
+        display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);
+        gap:10px;align-content:start}
+  @media(max-width:900px){#deck{grid-template-columns:1fr}}
+  .col{display:flex;flex-direction:column;gap:10px;min-width:0}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:9px;
+        padding:9px 11px}
+  .card h2{font-size:11px;margin:0 0 8px;color:var(--dim);
+           text-transform:uppercase;letter-spacing:.07em;font-weight:700}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(128px,1fr));
+        gap:7px}
+  button.act{font:inherit;cursor:pointer;border-radius:7px;
+             border:1px solid var(--line);background:var(--panel2);
+             color:var(--txt);padding:7px 9px;text-align:left;
+             transition:.15s;line-height:1.3}
+  button.act:hover:not(:disabled){border-color:var(--acc);background:#22304a}
+  button.act:disabled{opacity:.42;cursor:not-allowed}
+  button.act .t{display:block;font-weight:600;font-size:13px}
+  button.act .s{display:block;font-size:10px;color:var(--dim);margin-top:2px}
   .btn-primary{border-color:#238636;background:#1a7f37}
   .btn-primary:hover:not(:disabled){background:#238636;border-color:#3fb950}
-  .btn-danger{border-color:#8b2d2d;background:#4a1d1d}
-  .btn-danger:hover:not(:disabled){background:#6e2b2b;border-color:#f85149}
   .btn-warn{border-color:#7a5c15;background:#3d2f0a}
-  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}
-  label.opt{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dim)}
-  input[type=number],input[type=text]{width:74px;background:#0d1117;color:var(--txt);
-       border:1px solid var(--line);border-radius:6px;padding:5px 7px;font:inherit}
+  .row{display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin-top:8px}
+  label.opt{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--dim)}
+  input[type=number]{width:64px;background:#0d1117;color:var(--txt);
+        border:1px solid var(--line);border-radius:6px;padding:4px 6px;font:inherit}
   input[type=checkbox]{accent-color:var(--acc)}
-  #log{height:300px;overflow:auto;background:#0a0d12;border:1px solid var(--line);
-       border-radius:8px;padding:10px;font:12px/1.5 Consolas,"Courier New",monospace;
+
+  #log{height:150px;overflow:auto;background:#0a0d12;border:1px solid var(--line);
+       border-radius:7px;padding:8px;
+       font:11.5px/1.45 Consolas,"Courier New",monospace;
        white-space:pre-wrap;word-break:break-all}
-  #log div{margin:1px 0}
-  #log .t{color:#6e7681;margin-right:8px}
+  #log .t{color:#6e7681;margin-right:6px}
   #log .e{color:var(--err)}
   #log .o{color:var(--ok)}
-  #shot{width:100%;border-radius:8px;border:1px solid var(--line);background:#000;
-        aspect-ratio:20/9;object-fit:contain}
-  .kv{display:flex;justify-content:space-between;font-size:12px;padding:3px 0;
+  .kv{display:flex;justify-content:space-between;font-size:12px;padding:2px 0;
       border-bottom:1px dashed #21262d}
   .kv span:first-child{color:var(--dim)}
-  .chart{display:flex;align-items:flex-end;gap:3px;height:74px;margin-top:8px}
+  .chart{display:flex;align-items:flex-end;gap:2px;height:44px;margin-top:6px}
   .chart div{flex:1;background:linear-gradient(180deg,#2f81f7,#1a4f9e);
-             border-radius:2px 2px 0 0;min-height:3px;position:relative}
-  .chart div[data-d]{position:relative}
-  .hint{font-size:12px;color:var(--dim);margin-top:8px;line-height:1.6}
-  .toast{position:fixed;right:18px;bottom:18px;background:#21262d;color:var(--txt);
+             border-radius:2px 2px 0 0;min-height:2px}
+  .toast{position:fixed;right:16px;bottom:16px;background:#21262d;color:var(--txt);
          border:1px solid var(--line);border-left:3px solid var(--acc);
-         padding:11px 15px;border-radius:8px;font-size:13px;opacity:0;
-         transform:translateY(8px);transition:.25s;max-width:340px;z-index:20}
+         padding:10px 14px;border-radius:8px;font-size:13px;opacity:0;
+         transform:translateY(8px);transition:.22s;max-width:330px;z-index:30}
   .toast.show{opacity:1;transform:none}
 </style>
 </head>
 <body>
 <header>
-  <h1>War Robots 自动化控制台</h1>
-  <span style="color:#6e7681;font-size:11px;letter-spacing:.04em">build 2</span>
+  <h1>War Robots 控制台</h1>
+  <span class="ver">build 4</span>
   <span id="badge" class="badge b-idle">空闲</span>
   <span id="elapsed" style="color:var(--dim);font-size:12px"></span>
   <span class="spacer"></span>
   <span id="ui" class="badge b-idle">界面：—</span>
-  <button id="btnStop" class="btn-danger" style="padding:7px 14px" disabled>■ 停止</button>
+  <span id="tq" class="badge b-idle" title="远程点击队列">点击 0</span>
+  <label class="opt" style="margin:0 4px">
+    <input type="checkbox" id="tapOn" checked> 点击控制
+  </label>
+  <label class="opt" style="margin:0 4px">
+    刷新
+    <select id="shotRate">
+      <option value="0">不自动</option>
+      <option value="3000">3 秒</option>
+      <option value="5000" selected>5 秒</option>
+      <option value="8000">8 秒</option>
+    </select>
+  </label>
+  <button id="btnStop" class="btn-danger" disabled>■ 停止</button>
 </header>
 
-<main>
-  <div>
-    <div class="card" style="margin-bottom:14px">
+<div id="stage">
+  <div id="wrap">
+    <img id="shot" alt="手机画面（点击=远程点击）">
+  </div>
+  <div id="hint">点击画面 = 远程点击手机</div>
+  <div id="lockedMask">
+    <div class="lockBox">
+      <div style="font-size:34px">🔒</div>
+      <div style="font-weight:700;font-size:15px;margin-top:6px">手机锁屏中</div>
+      <div style="font-size:12px;color:#9aa4b2;margin-top:6px;line-height:1.6">
+        锁屏会屏蔽截图与触摸，自动化无法工作。<br>
+        请在手机上解锁一次（若设了密码需手动输入）。
+      </div>
+      <button id="btnWake" style="margin-top:12px;padding:8px 18px;border-radius:8px;
+              border:1px solid #238636;background:#1a7f37;color:#fff;cursor:pointer">
+        尝试唤醒 / 解锁
+      </button>
+    </div>
+  </div>
+</div>
+
+<div id="deck">
+  <div class="col">
+    <div class="card">
       <h2>常用操作</h2>
       <div class="grid">
-        <button data-a="state"><span class="t">识别界面</span><span class="s">看当前在哪个界面</span></button>
-        <button data-a="home"><span class="t">回到机库</span><span class="s">任意界面复位</span></button>
-        <button data-a="claim"><span class="t">领取任务奖励</span><span class="s">活动任务礼包</span></button>
-        <button data-a="rating"><span class="t">读取荣誉积分</span><span class="s">当前难度分值</span></button>
-        <button data-a="history"><span class="t">分值趋势</span><span class="s">历史变化</span></button>
-        <button data-a="battle" class="btn-primary"><span class="t">打一局</span><span class="s">停留 ≥70 秒</span></button>
+        <button class="act" data-a="state"><span class="t">识别界面</span><span class="s">看当前在哪个界面</span></button>
+        <button class="act" data-a="home"><span class="t">回到机库</span><span class="s">任意界面复位</span></button>
+        <button class="act" data-a="claim"><span class="t">领取任务奖励</span><span class="s">活动任务礼包</span></button>
+        <button class="act" data-a="rating"><span class="t">读取荣誉积分</span><span class="s">当前难度分值</span></button>
+        <button class="act" data-a="history"><span class="t">分值趋势</span><span class="s">历史变化</span></button>
+        <button class="act btn-primary" data-a="battle"><span class="t">打一局</span><span class="s">停留 ≥70 秒</span></button>
       </div>
     </div>
 
-    <div class="card" style="margin-bottom:14px">
+    <div class="card">
       <h2>广告 / 领资源</h2>
       <div class="grid">
-        <button data-a="daily"><span class="t">每日任务</span><span class="s">看广告 + 领奖</span></button>
-        <button data-a="lottery" class="btn-warn"><span class="t">供给中心抽奖</span><span class="s">3 次/天，含冷却等待</span></button>
-        <button data-a="upgrade"><span class="t">升级减时</span><span class="s">看广告 −4 小时升级</span></button>
-        <button data-a="deals"><span class="t">特惠礼包</span><span class="s">购物车 → 看广告领前 3 个</span></button>
-        <button data-a="ads"><span class="t">广告流程</span><span class="s">每日/活动/黑市自动切换</span></button>
-        <button data-a="all" class="btn-primary"><span class="t">完整日常</span><span class="s">领奖 + 广告 + 抽奖 + 升级</span></button>
+        <button class="act" data-a="daily"><span class="t">每日任务</span><span class="s">看广告 + 领奖</span></button>
+        <button class="act btn-warn" data-a="lottery"><span class="t">供给中心抽奖</span><span class="s">3 次/天，含冷却</span></button>
+        <button class="act" data-a="upgrade"><span class="t">升级减时</span><span class="s">看广告 −4 小时</span></button>
+        <button class="act" data-a="deals"><span class="t">特惠礼包</span><span class="s">购物车 → 前 3 个</span></button>
+        <button class="act" data-a="ads"><span class="t">广告流程</span><span class="s">每日/活动/黑市</span></button>
+        <button class="act btn-primary" data-a="all"><span class="t">完整日常</span><span class="s">领奖+广告+抽奖+升级</span></button>
       </div>
       <div class="row">
         <label class="opt">广告轮数 <input type="number" id="p_rounds" value="8" min="1" max="30"></label>
@@ -487,55 +621,42 @@ HTML = r"""<!DOCTYPE html>
     <div class="card">
       <h2>降难度（循环对局）</h2>
       <div class="grid">
-        <button data-a="loop" class="btn-primary"><span class="t">循环打局</span><span class="s">每局 ≥70 秒 + 记录分值</span></button>
+        <button class="act btn-primary" data-a="loop"><span class="t">循环打局</span><span class="s">每局 ≥70 秒 + 记分</span></button>
       </div>
       <div class="row">
         <label class="opt">局数 <input type="number" id="p_cycles" value="6" min="1" max="30"></label>
       </div>
-      <div class="hint">
-        技巧：不要指望单局就降分。建议每天点一次「循环打局」（6 局约 15 分钟），
-        再用「分值趋势」对比首末值。目标分值与难度正相关，越低越好。
-      </div>
     </div>
   </div>
 
-  <div>
-    <div class="card" style="margin-bottom:14px">
-      <h2>手机画面 <span id="shotTs" style="color:var(--dim);font-weight:400;text-transform:none"></span></h2>
-      <img id="shot" alt="手机截图">
-      <div class="row">
-        <label class="opt"><input type="checkbox" id="autoShot" checked> 自动刷新（4 秒）</label>
-        <button id="btnShot" style="padding:6px 12px;font-size:12px">立即刷新</button>
-      </div>
-    </div>
-
-    <div class="card" style="margin-bottom:14px">
-      <h2>分值记录</h2>
-      <div id="kvbox"></div>
-      <div class="chart" id="chart"></div>
-    </div>
-
+  <div class="col">
     <div class="card">
       <h2>运行日志</h2>
       <div id="log"></div>
       <div class="row">
         <label class="opt"><input type="checkbox" id="autoScroll" checked> 自动滚动</label>
-        <button id="btnClear" style="padding:6px 12px;font-size:12px">清空显示</button>
+        <button class="act" id="btnClear" style="padding:4px 10px;font-size:12px">清空</button>
       </div>
     </div>
+    <div class="card">
+      <h2>分值记录</h2>
+      <div id="kvbox"></div>
+      <div class="chart" id="chart"></div>
+    </div>
   </div>
-</main>
+</div>
 
 <div class="toast" id="toast"></div>
 
 <script>
 const $ = s => document.querySelector(s);
 let logSince = 0, busy = false, toastTimer = null;
+let lastW = 2400, lastH = 1080;      // 手机画面原始尺寸（用于坐标映射）
 
 function toast(msg){
   const el = $('#toast'); el.textContent = msg; el.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(()=>el.classList.remove('show'), 3200);
+  toastTimer = setTimeout(()=>el.classList.remove('show'), 2600);
 }
 
 function params(){
@@ -549,12 +670,12 @@ function params(){
   };
 }
 
+/* ---------------- 动作按钮 ---------------- */
 document.querySelectorAll('button[data-a]').forEach(b=>{
   b.addEventListener('click', async ()=>{
     if (busy) { toast('已有任务在运行，请先停止'); return; }
     const a = b.dataset.a;
     const title = b.querySelector('.t').textContent;
-    // 立即禁用，避免连点
     document.querySelectorAll('button[data-a]').forEach(x=>{ x.disabled = true; });
     try{
       const r = await fetch('/api/run', {
@@ -563,9 +684,7 @@ document.querySelectorAll('button[data-a]').forEach(b=>{
       });
       const j = await r.json();
       toast(j.ok ? ('▶ 已启动：' + title) : ('启动失败：' + j.msg));
-    }catch(e){
-      toast('请求失败：' + e);
-    }
+    }catch(e){ toast('请求失败：' + e); }
     refresh();
   });
 });
@@ -576,30 +695,113 @@ $('#btnStop').addEventListener('click', async ()=>{
   toast(j.msg || '已请求停止');
   refresh();
 });
-
 $('#btnClear').addEventListener('click', ()=>{ $('#log').innerHTML=''; });
-$('#btnShot').addEventListener('click', ()=> refreshShot(true));
+$('#btnWake').addEventListener('click', async ()=>{
+  try{
+    const r = await fetch('/api/run', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({action:'wake', params:{}})});
+    const j = await r.json();
+    toast(j.ok ? '已尝试唤醒，若仍黑屏请在手机上手动解锁' : ('失败：' + j.msg));
+  }catch(e){ toast('请求失败：' + e); }
+  setTimeout(()=>{ refreshShot(); refresh(); }, 2500);
+});
 
-async function refreshShot(force){
-  if(!force && !$('#autoShot').checked) return;
+/* ---------------- 画面点击 → 远程点击 ---------------- */
+/* 关键：对象适配(object-fit:contain)会在元素内留黑边，
+   必须按"实际绘制区域"换算，否则坐标会整体偏移 */
+function toDeviceCoords(clientX, clientY){
+  const img = $('#shot');
+  const r = img.getBoundingClientRect();
+  const nw = img.naturalWidth || lastW;
+  const nh = img.naturalHeight || lastH;
+  const scale = Math.min(r.width / nw, r.height / nh);
+  const drawnW = nw * scale, drawnH = nh * scale;
+  const offX = r.left + (r.width - drawnW) / 2;
+  const offY = r.top + (r.height - drawnH) / 2;
+  const x = (clientX - offX) / scale;
+  const y = (clientY - offY) / scale;
+  if (x < 0 || y < 0 || x > nw || y > nh) return null;   // 点在黑边上
+  return {x: Math.round(x), y: Math.round(y), nw, nh};
+}
+
+function mark(clientX, clientY){
+  const wrap = $('#wrap');
+  const wr = wrap.getBoundingClientRect();
+  const el = document.createElement('div');
+  el.className = 'mark';
+  el.style.left = (clientX - wr.left) + 'px';
+  el.style.top  = (clientY - wr.top) + 'px';
+  wrap.appendChild(el);
+  setTimeout(()=>el.remove(), 600);
+}
+
+$('#shot').addEventListener('click', async (ev)=>{
+  if (!$('#tapOn').checked) return;
+  const c = toDeviceCoords(ev.clientX, ev.clientY);
+  if (!c) return;                       // 点在黑边，忽略
+  mark(ev.clientX, ev.clientY);         // 立即给视觉反馈（不等手机刷新）
+  try{
+    const r = await fetch('/api/tap', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({x: c.x, y: c.y})
+    });
+    const j = await r.json();
+    if (!j.ok) toast('点击失败：' + j.msg);
+    else updateTapBadge(j.queued);
+  }catch(e){ toast('点击请求失败：' + e); }
+});
+
+/* 鼠标位置坐标提示 */
+$('#shot').addEventListener('mousemove', (ev)=>{
+  const c = toDeviceCoords(ev.clientX, ev.clientY);
+  $('#hint').textContent = c
+    ? ('坐标 ' + c.x + ', ' + c.y + '  /  ' + c.nw + '×' + c.nh + '　点击=远程点击')
+    : '点击画面 = 远程点击手机';
+});
+
+function updateTapBadge(n){
+  const el = $('#tq');
+  el.textContent = '点击 ' + (n || 0);
+  el.className = 'badge ' + ((n || 0) > 0 ? 'b-run' : 'b-idle');
+}
+
+/* ---------------- 画面刷新（可调频率，点完不强制刷新） ---------------- */
+let shotTimer = null;
+async function refreshShot(){
   try{
     const r = await fetch('/api/shot?t=' + Date.now());
     if(!r.ok) return;
     const blob = await r.blob();
     if(blob.size < 500) return;
-    $('#shot').src = URL.createObjectURL(blob);
-    $('#shotTs').textContent = new Date().toLocaleTimeString();
+    const img = $('#shot');
+    const url = URL.createObjectURL(blob);
+    const old = img.src;
+    img.onload = ()=>{
+      lastW = img.naturalWidth; lastH = img.naturalHeight;
+      if (old && old.startsWith('blob:')) URL.revokeObjectURL(old);
+    };
+    img.src = url;
   }catch(e){}
 }
+function setShotRate(){
+  if (shotTimer) { clearInterval(shotTimer); shotTimer = null; }
+  const ms = +$('#shotRate').value;
+  if (ms > 0) shotTimer = setInterval(refreshShot, ms);
+}
+$('#shotRate').addEventListener('change', setShotRate);
+$('#tapOn').addEventListener('change', ()=>{
+  $('#shot').classList.toggle('noclick', !$('#tapOn').checked);
+});
 
+/* ---------------- 日志 ---------------- */
 function addLogs(items){
   const box = $('#log');
   const frag = document.createDocumentFragment();
   for(const it of items){
     const div = document.createElement('div');
-    const cls = /✘|异常|失败|ERROR/.test(it.m) ? 'e'
-              : (/✔|完成|已恢复|OK/.test(it.m) ? 'o' : '');
-    div.className = cls;
+    div.className = /✘|异常|失败|ERROR/.test(it.m) ? 'e'
+                  : (/✔|完成|已恢复|OK/.test(it.m) ? 'o' : '');
     div.innerHTML = '<span class="t">' + it.t + '</span>' +
                     it.m.replace(/[<>&]/g, c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
     frag.appendChild(div);
@@ -608,6 +810,7 @@ function addLogs(items){
   if($('#autoScroll').checked) box.scrollTop = box.scrollHeight;
 }
 
+/* ---------------- 状态轮询 ---------------- */
 async function refresh(){
   try{
     const r = await fetch('/api/status?since=' + logSince);
@@ -618,34 +821,34 @@ async function refresh(){
     if(busy){
       b.className = 'badge b-run'; b.textContent = '运行中：' + j.task.action;
       $('#elapsed').textContent = j.task.elapsed != null ? (j.task.elapsed + ' 秒') : '';
+    }else if(j.task.error){
+      b.className = 'badge b-err'; b.textContent = '上次失败';
+      $('#elapsed').textContent = j.task.error;
+    }else if(j.task.result !== null && j.task.result !== undefined && j.task.action){
+      b.className = 'badge b-ok'; b.textContent = '上次完成';
+      $('#elapsed').textContent = String(j.task.result);
     }else{
-      if(j.task.error){
-        b.className = 'badge b-err'; b.textContent = '上次失败';
-        $('#elapsed').textContent = j.task.error;
-      }else if(j.task.result !== null && j.task.result !== undefined && j.task.action){
-        b.className = 'badge b-ok'; b.textContent = '上次完成';
-        $('#elapsed').textContent = String(j.task.result);
-      }else{
-        b.className = 'badge b-idle'; b.textContent = '空闲';
-        $('#elapsed').textContent = '';
-      }
+      b.className = 'badge b-idle'; b.textContent = '空闲';
+      $('#elapsed').textContent = '';
     }
     $('#btnStop').disabled = !busy;
     document.querySelectorAll('button[data-a]').forEach(x=>{ x.disabled = busy; });
+
+    $('#lockedMask').classList.toggle('show', j.ui_state === 'locked');
 
     const uiEl = $('#ui');
     uiEl.textContent = '界面：' + (j.ui_state || '—');
     uiEl.className = 'badge ' + (j.ui_state === 'battle' ? 'b-run'
                      : j.ui_state === 'hangar' ? 'b-ok' : 'b-idle');
 
+    updateTapBadge(j.tap_queue);
+
     if(j.logs && j.logs.length){ addLogs(j.logs); }
     logSince = j.log_total;
 
-    // 分值
     if(j.rating && j.rating.length){
       const hist = j.rating;
-      const last = hist[hist.length-1];
-      const first = hist[0];
+      const last = hist[hist.length-1], first = hist[0];
       $('#kvbox').innerHTML =
         '<div class="kv"><span>最新分值</span><span style="color:var(--acc);font-weight:700">' + last.rating + '</span></div>' +
         '<div class="kv"><span>样本数</span><span>' + hist.length + '</span></div>' +
@@ -662,15 +865,13 @@ async function refresh(){
   }catch(e){ /* 网络抖动忽略 */ }
 }
 
-setInterval(refresh, 2500);
-setInterval(()=>{ if(!$('#autoShot').checked) return; refreshShot(false); }, 4000);
-refresh(); refreshShot(true);
+setInterval(refresh, 2000);
+setShotRate();
+refresh(); refreshShot();
 </script>
 </body>
 </html>
 """
-
-
 # ============================================================ HTTP 服务
 class Handler(BaseHTTPRequestHandler):
     server_version = "WRAuto/1.0"
@@ -716,6 +917,10 @@ class Handler(BaseHTTPRequestHandler):
                 "logs": LOG.snapshot(since),
                 "log_total": LOG.total(),
                 "rating": hist,
+                "tap_queue": queue_len(),
+                "tap_done": TAP_STATS["done"],
+                "tap_fail": TAP_STATS["fail"],
+                "tap_last": TAP_STATS["last"],
             })
             return
 
@@ -752,6 +957,24 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": ok, "msg": msg})
             return
 
+        # ---- 远程点击：入队后由后台线程按序发给手机 ----
+        if self.path == "/api/tap":
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                data = json.loads(self.rfile.read(n).decode("utf-8") or "{}")
+                x = float(data.get("x"))
+                y = float(data.get("y"))
+            except Exception:
+                self._json({"ok": False, "msg": "坐标解析失败"}, 400)
+                return
+            if not (0 <= x <= 20000 and 0 <= y <= 20000):
+                self._json({"ok": False, "msg": "坐标超出范围"}, 400)
+                return
+            q = enqueue_tap(x, y)
+            self._json({"ok": True, "queued": q,
+                        "msg": "已入队 (%d,%d)" % (x, y)})
+            return
+
         self._json({"ok": False, "msg": "not found"}, 404)
 
 
@@ -761,7 +984,13 @@ def main():
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--lan", action="store_true",
+                    help="监听 0.0.0.0，允许局域网内其它设备访问（远程遥控）")
     args = ap.parse_args()
+    if args.lan:
+        args.host = "0.0.0.0"
+
+    start_tap_worker()
 
     # 启动前检查设备
     d.ensure_server()

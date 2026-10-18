@@ -204,3 +204,73 @@ upgrade deals ads all loop
 
 **教训**：改前端后不能只靠"重启了"来判断，要**抓页面内容验证**。
 另外不要用 `/api/stop` 当"重启服务"用 —— 它只停任务。
+
+---
+
+## 布局改版（build 3/4）：上半屏画面 + 下半屏按钮 + 远程点击
+
+### 布局
+
+```
+┌──────────────────────────────────────────┐
+│ 顶栏：状态 / 界面 / 点击队列 / 刷新频率 / 停止 │
+├──────────────────────────────────────────┤
+│                                          │
+│      手机画面（占上方约 60%，可点击）        │
+│                                          │
+├──────────────────────────────────────────┤
+│  常用操作 │ 广告·领资源 │ 降难度   │ 日志/分值 │
+└──────────────────────────────────────────┘
+```
+
+上半屏 `flex:1 1 60%`，下半屏 `flex:1 1 40%` 且内部可滚动。
+
+### 远程点击（重点）
+
+在画面上点一下 → 点击**先入队**，后台线程按顺序发给手机。
+
+**为什么要排队而不是直接发**：
+- 无线 ADB 单次操作 ~2s，若每次都"点了就等新截图确认"，会把带宽和 adb 压满
+- 入队后前端立刻画一个准星做反馈，**不触发截图刷新**；
+  画面按设定的频率（默认 5 秒）自然刷新
+
+服务端实现：
+```python
+TAP_QUEUE = collections.deque()
+TAP_COND  = threading.Condition()
+TAP_GAP   = 0.15        # 两次点击最小间隔
+
+def _tap_worker():      # 后台线程
+    while True:
+        ... 取一个 (x,y) ...
+        with DEV_LOCK:  # 与截图共用锁，避免争抢
+            d.tap(x, y)
+        time.sleep(TAP_GAP)
+```
+
+接口：
+- `POST /api/tap {x,y}` → `{ok, queued}`
+- `/api/status` 返回 `tap_queue` / `tap_done` / `tap_fail` / `tap_last`
+
+### 坐标映射（容易错的地方）
+
+画面用 `object-fit: contain`，元素内会有**黑边（letterbox）**，
+必须按"实际绘制区域"换算，否则整体偏移：
+
+```js
+const scale = Math.min(r.width/nw, r.height/nh);
+const drawnW = nw*scale, drawnH = nh*scale;
+const offX = r.left + (r.width - drawnW)/2;
+const offY = r.top  + (r.height - drawnH)/2;
+x = (clientX - offX)/scale;
+y = (clientY - offY)/scale;
+```
+
+`nw/nh` 用 `img.naturalWidth/Height`（**不要硬编码 2400x1080**）——
+竖屏时截图是 1080x2400，硬编码会全错。
+
+点在黑边上（x/y 越界）直接忽略，不发请求。
+
+### 刷新频率可调
+
+顶栏下拉：不自动 / 3 秒 / 5 秒（默认）/ 8 秒。无线环境建议 5 秒以上。
